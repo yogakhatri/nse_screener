@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Large raw data — not versioned
+data/raw/prices/bhavcopy/
+data/raw/prices/delivery/
+data/raw/prices/indices/
+data/raw/fundamentals/xbrl/
+data/raw/fundamentals/trendlyne/
+
+# SQLite databases (binary; regenerated from source data)
+data/raw/delisted/registry.db
+data/raw/fundamentals/pit_store.db
+
+# Run outputs (generated each run)
+runs/*/
+!runs/.gitkeep
+
+# Logs — errors only (weight_change_log IS versioned)
+logs/errors.log
+
+# OS
+.DS_Store
+Thumbs.db
+
