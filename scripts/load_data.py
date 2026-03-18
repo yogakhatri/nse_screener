@@ -1,5 +1,6 @@
 import csv
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -8,7 +9,15 @@ import pandas as pd
 sys.path.insert(0, ".")
 
 from engine import RawStockData, NSEClassification
-from engine.config import CARD_WEIGHTS, CARD_DATA_THRESHOLD
+from engine.config import (
+    CARD_WEIGHTS,
+    CARD_DATA_THRESHOLD,
+    ENABLE_RAW_PRICE_METRICS,
+    PRICE_HISTORY_LOOKBACK_SESSIONS,
+    RAW_PRICE_METRIC_FALLBACK_TO_CSV,
+    infer_template_code_from_basic_industry,
+    validate_runtime_config,
+)
 from engine.metric_definitions import (
     compute_asm_gsm_risk,
     compute_default_distress,
@@ -25,6 +34,7 @@ from engine.metric_definitions import (
     LOCKED_COE_BANK,
     LOCKED_COE_NBFC,
 )
+from scripts.price_history import compute_price_metrics_from_history, load_local_price_history
 
 METRIC_KEYS = sorted(
     {
@@ -123,6 +133,37 @@ CLASSIFICATION_ALIASES = {
 
 TICKER_ALIASES = ["NSE Symbol", "Symbol", "Ticker"]
 NAME_ALIASES = ["Name", "Company Name"]
+DERIVED_METRICS = {
+    "iv_gap",
+    "discount_to_iv",
+    "fair_value_gap",
+    "discount_to_fair_pb",
+    "default_distress",
+    "asm_gsm_risk",
+    "gnpa_nnpa_stress",
+    "capital_adequacy_stress",
+    "pcr_weakness",
+    "alm_mismatch",
+    "liquidity_manipulation",
+    "governance_event",
+    "governance_promoter",
+    "surveillance_default",
+    "accounting_quality",
+}
+RAW_PRICE_METRICS = {
+    "close_price",
+    "return_1y",
+    "return_6m",
+    "cagr_5y",
+    "drawdown_recovery",
+    "drawdown_normalization",
+    "rsi_state",
+    "price_vs_200dma",
+    "price_vs_50dma",
+    "volatility_compression",
+    "volume",
+    "avg_daily_turnover_cr",
+}
 
 
 def _norm(name: str) -> str:
@@ -214,6 +255,30 @@ def _fill_direct_metrics(row: pd.Series, fundamentals: dict) -> None:
             fundamentals[metric] = value
 
 
+def _apply_price_history_metrics(
+    fundamentals: dict,
+    raw: dict,
+    price_history: Optional[pd.DataFrame],
+) -> None:
+    computed = compute_price_metrics_from_history(price_history)
+    if not computed:
+        if not RAW_PRICE_METRIC_FALLBACK_TO_CSV:
+            for metric in RAW_PRICE_METRICS:
+                fundamentals[metric] = None
+        return
+    for metric, value in computed.items():
+        if value is None:
+            continue
+        fundamentals[metric] = value
+        if metric == "close_price":
+            raw["close_price"] = value
+        if metric == "avg_daily_turnover_cr":
+            raw["avg_daily_turnover_cr"] = value
+    if not RAW_PRICE_METRIC_FALLBACK_TO_CSV:
+        for metric in RAW_PRICE_METRICS - set(computed):
+            fundamentals[metric] = None
+
+
 def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> tuple[bool, bool]:
     close_price = raw.get("close_price")
     intrinsic_value = raw.get("intrinsic_value")
@@ -287,21 +352,51 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
 
 
 def _template_hint(basic_industry: str) -> str:
-    txt = basic_industry.lower()
-    if "bank" in txt:
-        return "B"
-    if "nbfc" in txt or "housing finance" in txt or "micro finance" in txt or "hfc" in txt:
-        return "C"
-    return "A"
+    return infer_template_code_from_basic_industry(basic_industry)
 
 
-def load_from_screener(csv_path: str) -> dict:
+def validate_loader_support() -> None:
+    validate_runtime_config()
+    configured_metrics = {
+        metric
+        for cards in CARD_WEIGHTS.values()
+        for weights in cards.values()
+        for metric in weights
+    }
+    supported_metrics = set(DIRECT_ALIASES) | DERIVED_METRICS
+    missing = sorted(metric for metric in configured_metrics if metric not in supported_metrics)
+    if missing:
+        raise ValueError(
+            "Loader aliases/derivations missing configured metrics: "
+            f"{missing}. Add aliases or derivation support before running."
+        )
+
+
+def load_from_screener(
+    csv_path: str,
+    run_date: Optional[date] = None,
+    price_history_map: Optional[Dict[str, pd.DataFrame]] = None,
+) -> dict:
     """
     Read a Screener export CSV and return {ticker: RawStockData}.
     Supports multiple alias headers and derives missing risk metrics when possible.
     """
+    validate_loader_support()
     df = pd.read_csv(csv_path)
     universe: Dict[str, RawStockData] = {}
+    if ENABLE_RAW_PRICE_METRICS:
+        if price_history_map is None and run_date is not None:
+            tickers = {
+                _get_text(row, TICKER_ALIASES, "").upper()
+                for _, row in df.iterrows()
+                if _get_text(row, TICKER_ALIASES, "")
+            }
+            price_history_map = load_local_price_history(
+                run_date=run_date,
+                tickers=tickers,
+                lookback_sessions=PRICE_HISTORY_LOOKBACK_SESSIONS,
+            )
+    price_history_map = price_history_map or {}
 
     for _, row in df.iterrows():
         ticker = _get_text(row, TICKER_ALIASES, "").upper()
@@ -318,6 +413,9 @@ def load_from_screener(csv_path: str) -> dict:
         fundamentals = _init_fundamentals()
         _fill_direct_metrics(row, fundamentals)
         raw = _build_raw_inputs(row)
+        price_history = price_history_map.get(ticker)
+        if ENABLE_RAW_PRICE_METRICS:
+            _apply_price_history_metrics(fundamentals, raw, price_history)
 
         # Persist raw disqualifier inputs for strict red-flag checks.
         fundamentals["gnpa_pct"] = raw.get("gnpa_pct")
@@ -330,6 +428,8 @@ def load_from_screener(csv_path: str) -> dict:
         fundamentals["credit_rating_grade"] = raw.get("credit_rating_grade")
         fundamentals["governance_events"] = raw.get("governance_events")
         fundamentals["close_price"] = raw.get("close_price")
+        fundamentals["asm_stage"] = raw.get("asm_stage")
+        fundamentals["gsm_stage"] = raw.get("gsm_stage")
 
         on_asm, on_gsm = _fill_derived_metrics(
             fundamentals=fundamentals,
@@ -341,6 +441,7 @@ def load_from_screener(csv_path: str) -> dict:
             ticker=ticker,
             name=_get_text(row, NAME_ALIASES, ticker),
             classification=classification,
+            price_history=price_history,
             fundamentals=fundamentals,
             on_asm=on_asm,
             on_gsm=on_gsm,
@@ -353,24 +454,32 @@ def metric_coverage(universe: dict) -> dict:
     Coverage report by template/card for quick run diagnostics.
     """
     report: dict = {}
+    by_template: Dict[str, list] = {template: [] for template in CARD_WEIGHTS}
+    for stock in universe.values():
+        template = infer_template_code_from_basic_industry(stock.classification.basic_industry)
+        by_template.setdefault(template, []).append(stock)
+
     for template, cards in CARD_WEIGHTS.items():
         report[template] = {}
+        stocks_for_template = by_template.get(template, [])
         for card, weights in cards.items():
             covered = []
-            for stock in universe.values():
-                total = sum(weights.values())
+            total_weight = sum(weights.values())
+            for stock in stocks_for_template:
                 seen = 0.0
                 for metric, weight in weights.items():
                     if stock.fundamentals.get(metric) is not None:
                         seen += weight
-                covered.append(round(seen / total, 3) if total else 0.0)
-            avg_cov = round(sum(covered) / len(covered), 3) if covered else 0.0
-            rankable_rate = round(
-                sum(1 for c in covered if c >= CARD_DATA_THRESHOLD) / len(covered) * 100.0, 2
-            ) if covered else 0.0
+                covered.append(round(seen / total_weight, 3) if total_weight else 0.0)
+            n_stocks = len(covered)
+            n_rankable = sum(1 for c in covered if c >= CARD_DATA_THRESHOLD)
+            avg_cov = round(sum(covered) / n_stocks, 3) if covered else 0.0
+            rankable_rate = round((n_rankable / n_stocks) * 100.0, 2) if covered else 0.0
             report[template][card] = {
                 "avg_coverage": avg_cov,
                 "rankable_pct": rankable_rate,
+                "n_stocks": n_stocks,
+                "n_rankable": n_rankable,
             }
     return report
 

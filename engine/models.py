@@ -82,6 +82,9 @@ class StockRating:
     sector_percentile:    Optional[float] = None
     basic_industry_rank:  Optional[int] = None
     basic_industry_percentile: Optional[float] = None
+    template_supported:   bool = True
+    template_support_status: str = "Supported"
+    template_support_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         from .output import to_dict

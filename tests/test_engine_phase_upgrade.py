@@ -3,7 +3,9 @@ import unittest
 from engine import NSERatingEngine, RawStockData, NSEClassification
 from engine.advanced import action_sheet_rows, portfolio_plan_rows
 from engine.bias_controls import BiasAudit
+from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS
+from engine.models import Template
 
 
 def _make_stock(ticker: str, pe: float, growth: float, pledge: float = 0.0) -> RawStockData:
@@ -115,8 +117,26 @@ class PhaseUpgradeTests(unittest.TestCase):
         leaderboard = engine.to_leaderboard(ratings, exclude_statuses=("Insufficient Data",))
         actions = action_sheet_rows(ratings)
         self.assertGreaterEqual(len(actions), 1)
+        self.assertIn("investability_status", actions[0])
+        self.assertIn("template_support_status", actions[0])
         portfolio = portfolio_plan_rows(leaderboard)
         self.assertIsInstance(portfolio, list)
+
+    def test_stage1_asm_is_not_forced_disqualifier(self) -> None:
+        stock = _make_stock("ASM1", pe=25.0, growth=1.5)
+        stock.fundamentals["asm_stage"] = 1
+        stock.on_asm = True
+        peers = [_make_stock("PEER1", pe=26.0, growth=1.0), _make_stock("PEER2", pe=24.0, growth=2.0)]
+        card = score_red_flags(stock, peers, Template.GENERAL)
+        self.assertNotEqual(card.label, "Severe")
+
+    def test_stage3_asm_forces_disqualifier(self) -> None:
+        stock = _make_stock("ASM3", pe=25.0, growth=1.5)
+        stock.fundamentals["asm_stage"] = 3
+        stock.on_asm = True
+        peers = [_make_stock("PEER1", pe=26.0, growth=1.0), _make_stock("PEER2", pe=24.0, growth=2.0)]
+        card = score_red_flags(stock, peers, Template.GENERAL)
+        self.assertEqual(card.label, "Severe")
 
 
 if __name__ == "__main__":

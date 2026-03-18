@@ -6,6 +6,7 @@ Folder contract:
   /data/raw/prices/delivery/          ← NSE delivery position ZIPs
   /data/raw/prices/indices/           ← NSE index EOD CSVs
   /data/raw/prices/yfinance_cache/    ← yfinance fallback parquet cache
+  /data/raw/universe/                 ← Daily NSE universe symbol snapshots
   /data/raw/fundamentals/xbrl/        ← Raw XBRL XMLs by {symbol}/{quarter}/
   /data/raw/fundamentals/screener/    ← Screener.in manual export CSVs
   /data/raw/fundamentals/trendlyne/   ← Trendlyne API JSON responses
@@ -14,6 +15,7 @@ Folder contract:
   /data/raw/redflags/gsm/             ← GSM list downloads (dated)
   /data/raw/redflags/shareholding/    ← BSE SHP XBRL by {symbol}/{quarter}/
   /data/processed/                    ← Cleaned parquet/CSV files ready for engine
+  /data/processed/universe/           ← Universe prep reports + missing-symbol diagnostics
   /runs/{YYYY-MM-DD}/                 ← One folder per engine run date
     inputs_manifest.json              ← Every file used + its hash + freshness
     scores_raw.csv                    ← All 6 card scores per stock (pre-cap)
@@ -39,6 +41,7 @@ FOLDER_MAP = {
     "delivery":        PROJECT_ROOT / "data/raw/prices/delivery",
     "indices":         PROJECT_ROOT / "data/raw/prices/indices",
     "yfinance":        PROJECT_ROOT / "data/raw/prices/yfinance_cache",
+    "universe":        PROJECT_ROOT / "data/raw/universe",
     "xbrl":            PROJECT_ROOT / "data/raw/fundamentals/xbrl",
     "screener":        PROJECT_ROOT / "data/raw/fundamentals/screener",
     "trendlyne":       PROJECT_ROOT / "data/raw/fundamentals/trendlyne",
@@ -47,6 +50,7 @@ FOLDER_MAP = {
     "gsm":             PROJECT_ROOT / "data/raw/redflags/gsm",
     "shareholding":    PROJECT_ROOT / "data/raw/redflags/shareholding",
     "processed":       PROJECT_ROOT / "data/processed",
+    "processed_universe": PROJECT_ROOT / "data/processed/universe",
     "logs":            PROJECT_ROOT / "logs",
 }
 

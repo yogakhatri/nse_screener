@@ -2,9 +2,23 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 .venv/
+env/
 *.egg-info/
+*.egg
 .pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # Large raw data — not versioned
 data/raw/prices/bhavcopy/
@@ -12,6 +26,17 @@ data/raw/prices/delivery/
 data/raw/prices/indices/
 data/raw/fundamentals/xbrl/
 data/raw/fundamentals/trendlyne/
+data/raw/fundamentals/screener/*.csv
+data/raw/fundamentals/screener/cache/
+data/raw/universe/*.csv
+data/raw/classification/*.csv
+data/raw/redflags/asm/*.csv
+data/raw/redflags/gsm/*.csv
+data/raw/redflags/shareholding/*.csv
+
+# Processed data (all regenerable)
+data/processed/
+!data/processed/.gitkeep
 
 # SQLite databases (binary; regenerated from source data)
 data/raw/delisted/registry.db
@@ -23,8 +48,19 @@ runs/*/
 
 # Logs — errors only (weight_change_log IS versioned)
 logs/errors.log
+logs/recommendation_history.csv
+
+# One-off scripts
+run_test.py
+
+# Scheduler plists/configs
+*.plist
+nse_screener_daily
+
+# Secrets / env
+.env
+.env.*
 
 # OS
 .DS_Store
 Thumbs.db
-

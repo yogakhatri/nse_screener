@@ -42,6 +42,18 @@ SOURCES = {
         local_path   = "data/raw/prices/bhavcopy/",
     ),
 
+    "nse_equity_universe": DataSource(
+        source_id    = "nse_equity_universe",
+        name         = "NSE Active Equity Universe (derived from daily bhavcopy, EQ series)",
+        source_type  = "official_archive",
+        base_url     = "https://archives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MMM}/cm{DD}{MMM}{YYYY}bhav.csv.zip",
+        format       = "zip/csv",
+        refresh_sla  = "Daily (after market close)",
+        cache_ttl_hours = 20,
+        rate_limit_note = "Download one bhavcopy ZIP per run date, extract SYMBOL where SERIES=EQ, cache locally.",
+        local_path   = "data/raw/universe/",
+    ),
+
     "nse_delivery": DataSource(
         source_id    = "nse_delivery",
         name         = "NSE Security-wise Delivery Position (daily)",
@@ -180,6 +192,18 @@ SOURCES = {
         rate_limit_note = "One-time download; update annually.",
         local_path   = "data/raw/classification/",
     ),
+
+    "nse_symbol_classification_master": DataSource(
+        source_id    = "nse_symbol_classification_master",
+        name         = "Symbol-to-Sector Classification Master (derived local mapping)",
+        source_type  = "computed",
+        base_url     = "local:data/raw/classification/nse_symbol_classification_master.csv",
+        format       = "csv",
+        refresh_sla  = "Monthly + on symbol additions/de-listings",
+        cache_ttl_hours = 30 * 24,
+        rate_limit_note = "Derived by combining NSE symbol universe with maintained sector/industry mapping.",
+        local_path   = "data/raw/classification/",
+    ),
 }
 
 # ─── Data Freshness SLAs ──────────────────────────────────────────
@@ -213,4 +237,3 @@ SURVIVORSHIP_RULES = {
         "Stocks suspended > 30 days: exclude from current ranking run; move to watchlist."
     ),
 }
-

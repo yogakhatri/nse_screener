@@ -47,6 +47,30 @@ CARD_DATA_THRESHOLD: float = 0.65
 # Raising this value increases reliability but will remove more names.
 MIN_RANKABLE_CARDS: int = 4
 
+# Production publish gate.
+# These controls operate at TEMPLATE level, not just whole-universe level.
+# Goal: if one template (for example Banks) is missing most of its cards,
+# we do not quietly publish outputs that make that template look supported.
+#
+# Interpretation:
+# - Each active template must have all configured core cards present at least at
+#   MIN_TEMPLATE_CARD_RANKABLE_PCT rankable coverage.
+# - Each active template must also have red-flags coverage above the threshold,
+#   because recommendations without risk coverage are not publishable.
+# - If a template fails, production runs should stop unless the operator
+#   explicitly uses debug/skip-quality-gate mode.
+MIN_TEMPLATE_CARD_RANKABLE_PCT: float = 25.0
+MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT: float = 25.0
+MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT: float = 55.0
+QUALITY_GATE_REQUIRE_ALL_CORE_CARDS: bool = True
+
+# Raw price-derived metric controls.
+# When enabled, locally cached bhavcopy history becomes the preferred source for
+# price/technical metrics. CSV values are used only when raw history is missing.
+ENABLE_RAW_PRICE_METRICS: bool = True
+PRICE_HISTORY_LOOKBACK_SESSIONS: int = 1300
+RAW_PRICE_METRIC_FALLBACK_TO_CSV: bool = True
+
 # Outlier clipping for peer distributions before percentile scoring.
 # Narrower bounds (e.g. 0.05/0.95) reduce tail influence more aggressively.
 WINSORIZE_LOWER: float = 0.03
@@ -442,3 +466,120 @@ INVESTABILITY = [
     (50, 70, "Watchlist"),
     (0, 50, "Avoid"),
 ]
+
+
+# ============================================================================
+# Runtime Helpers and Validation
+# ============================================================================
+
+SUPPORTED_TEMPLATE_CODES = ("A", "B", "C")
+SUPPORTED_CARD_NAMES = (
+    "performance",
+    "valuation",
+    "growth",
+    "profitability",
+    "entry_point",
+    "red_flags",
+)
+TEMPLATE_DISPLAY_NAMES = {
+    "A": "General",
+    "B": "Bank",
+    "C": "NBFC/HFC",
+}
+CONFIDENCE_LEVELS = ("Low", "Medium", "High")
+
+
+def configured_template_codes() -> tuple[str, ...]:
+    return tuple(CARD_WEIGHTS.keys())
+
+
+def configured_core_cards() -> tuple[str, ...]:
+    return tuple(OPPORTUNITY_WEIGHTS.keys())
+
+
+def infer_template_code_from_basic_industry(basic_industry: str) -> str:
+    if basic_industry in TEMPLATE_BANKS:
+        return "B"
+    if basic_industry in TEMPLATE_NBFC:
+        return "C"
+    return "A"
+
+
+def template_display_name(template_code: str) -> str:
+    return TEMPLATE_DISPLAY_NAMES.get(str(template_code), str(template_code))
+
+
+def validate_runtime_config() -> None:
+    def _assert_close(name: str, weights: dict[str, float], target: float = 1.0) -> None:
+        total = round(sum(float(v) for v in weights.values()), 8)
+        if abs(total - target) > 1e-6:
+            raise ValueError(f"{name} must sum to {target}, found {total}")
+
+    template_codes = configured_template_codes()
+    unsupported_templates = [code for code in template_codes if code not in SUPPORTED_TEMPLATE_CODES]
+    if unsupported_templates:
+        raise ValueError(
+            "Unsupported template codes in CARD_WEIGHTS: "
+            f"{unsupported_templates}. Supported codes: {SUPPORTED_TEMPLATE_CODES}"
+        )
+
+    for template_code, cards in CARD_WEIGHTS.items():
+        missing_cards = [card for card in SUPPORTED_CARD_NAMES if card not in cards]
+        extra_cards = [card for card in cards if card not in SUPPORTED_CARD_NAMES]
+        if missing_cards or extra_cards:
+            raise ValueError(
+                f"Template {template_code} cards must match {SUPPORTED_CARD_NAMES}. "
+                f"Missing={missing_cards}, Extra={extra_cards}"
+            )
+        for card_name, weights in cards.items():
+            if not weights:
+                raise ValueError(f"Template {template_code} card {card_name} cannot be empty")
+            _assert_close(f"CARD_WEIGHTS[{template_code}][{card_name}]", weights)
+
+    composite_weight_sets = {
+        "OPPORTUNITY_WEIGHTS": OPPORTUNITY_WEIGHTS,
+        "POTENTIAL_SCORE_WEIGHTS": POTENTIAL_SCORE_WEIGHTS,
+        "VALUATION_GAP_SCORE_WEIGHTS": VALUATION_GAP_SCORE_WEIGHTS,
+        "SECTOR_REGIME_WEIGHTS": SECTOR_REGIME_WEIGHTS,
+        "SELECTION_SCORE_WEIGHTS": SELECTION_SCORE_WEIGHTS,
+    }
+    for name, weights in composite_weight_sets.items():
+        if not weights:
+            raise ValueError(f"{name} cannot be empty")
+        _assert_close(name, weights)
+
+    missing_labels = [card for card in SUPPORTED_CARD_NAMES if card not in CARD_LABELS]
+    if missing_labels:
+        raise ValueError(f"CARD_LABELS missing cards: {missing_labels}")
+
+    invalid_conf = [
+        label for label in [GATE_MIN_CONFIDENCE_FOR_BUY, PORTFOLIO_MIN_CONFIDENCE]
+        if label not in CONFIDENCE_LEVELS
+    ]
+    if invalid_conf:
+        raise ValueError(
+            f"Confidence thresholds must be one of {CONFIDENCE_LEVELS}, found {invalid_conf}"
+        )
+
+    if CONFIDENCE_HIGH_THRESHOLD <= CONFIDENCE_MEDIUM_THRESHOLD:
+        raise ValueError(
+            "CONFIDENCE_HIGH_THRESHOLD must be greater than CONFIDENCE_MEDIUM_THRESHOLD"
+        )
+
+    if len(ENTRY_STAGE_WEIGHTS) != 3 or sum(ENTRY_STAGE_WEIGHTS) != 100:
+        raise ValueError("ENTRY_STAGE_WEIGHTS must contain exactly 3 values summing to 100")
+
+    pct_thresholds = {
+        "MIN_TEMPLATE_CARD_RANKABLE_PCT": MIN_TEMPLATE_CARD_RANKABLE_PCT,
+        "MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT": MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT,
+        "MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT": MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT,
+    }
+    for name, value in pct_thresholds.items():
+        if not (0.0 <= float(value) <= 100.0):
+            raise ValueError(f"{name} must be within 0-100, found {value}")
+
+    if PRICE_HISTORY_LOOKBACK_SESSIONS < MIN_TRADING_DAYS:
+        raise ValueError(
+            "PRICE_HISTORY_LOOKBACK_SESSIONS must be >= MIN_TRADING_DAYS "
+            f"({MIN_TRADING_DAYS}), found {PRICE_HISTORY_LOOKBACK_SESSIONS}"
+        )

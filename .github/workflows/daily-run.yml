@@ -1,0 +1,93 @@
+name: Daily Run
+
+on:
+  # Run Mon-Fri at 13:45 UTC (19:15 IST, after market close)
+  schedule:
+    - cron: "45 13 * * 1-5"
+
+  # Allow manual trigger with optional date override
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: "Run date (YYYY-MM-DD). Leave empty for today."
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Resolve run date
+        id: date
+        run: |
+          if [ -n "${{ inputs.run_date }}" ]; then
+            echo "RUN_DATE=${{ inputs.run_date }}" >> "$GITHUB_ENV"
+          else
+            echo "RUN_DATE=$(date +%F)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Bootstrap project
+        run: python scripts/bootstrap.py --sample-row
+
+      - name: Fetch universe
+        run: |
+          make fetch-universe RUN_DATE=${{ env.RUN_DATE }}
+
+      - name: Fetch price history
+        run: |
+          make fetch-price-history RUN_DATE=${{ env.RUN_DATE }} SESSIONS=60
+
+      - name: Data freshness check
+        run: |
+          make data-freshness RUN_DATE=${{ env.RUN_DATE }} || true
+
+      - name: Run engine (debug mode — no external fundamentals in CI)
+        run: |
+          make prepare-universe RUN_DATE=${{ env.RUN_DATE }} \
+            NSE_UNIVERSE_CSV=data/raw/universe/nse_symbols_${{ env.RUN_DATE }}.csv
+          make enrich-fundamentals RUN_DATE=${{ env.RUN_DATE }} || true
+          make run-debug RUN_DATE=${{ env.RUN_DATE }} \
+            SCREENER_CSV=data/raw/fundamentals/screener/screener_export_${{ env.RUN_DATE }}.csv || true
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-${{ env.RUN_DATE }}
+          path: |
+            runs/${{ env.RUN_DATE }}/
+          retention-days: 30
+
+      # --- Optional: Telegram notification ---
+      # Uncomment and set secrets TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID
+      # - name: Send Telegram alerts
+      #   if: success()
+      #   env:
+      #     TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      #   run: |
+      #     make telegram-alerts RUN_DATE=${{ env.RUN_DATE }}

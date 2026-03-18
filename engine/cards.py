@@ -39,6 +39,21 @@ METRIC_DIRECTION = {
     "alm_mismatch":False,
 }
 
+
+def validate_metric_direction_map() -> None:
+    configured_metrics = {
+        metric
+        for cards in CARD_WEIGHTS.values()
+        for weights in cards.values()
+        for metric in weights
+    }
+    missing = sorted(metric for metric in configured_metrics if metric not in METRIC_DIRECTION)
+    if missing:
+        raise ValueError(
+            "METRIC_DIRECTION missing configured metrics: "
+            f"{missing}. Add explicit direction entries before running."
+        )
+
 def _get_peer_vals(metric, peer_list):
     return [p.fundamentals.get(metric) for p in peer_list]
 
@@ -114,9 +129,12 @@ def score_red_flags(stock, peers, template):
     if not isinstance(gov_events, list):
         gov_events = []
 
+    asm_stage = int(f.get("asm_stage", 1 if stock.on_asm else 0) or 0)
+    gsm_stage = int(f.get("gsm_stage", 1 if stock.on_gsm else 0) or 0)
+
     is_disq, triggered = check_all_disqualifiers(
-        asm_stage   = 3 if stock.on_asm else 0,   # on_asm → treat as Stage 3
-        gsm_stage   = 1 if stock.on_gsm else 0,   # on_gsm → treat as Stage 1
+        asm_stage   = asm_stage,
+        gsm_stage   = gsm_stage,
         interest_coverage = interest_coverage,
         credit_rating_grade = int(credit_rating_grade) if credit_rating_grade is not None else None,
         pledge_pct  = pledge_pct,
@@ -129,7 +147,7 @@ def score_red_flags(stock, peers, template):
         governance_events = gov_events,
     )
 
-    if is_disq or stock.on_asm or stock.on_gsm:
+    if is_disq:
         cap_score = 15.0  # <20 → Uninvestable via RED_FLAG_CAPS; 20.0 boundary falls into Avoid
         triggers_str = "; ".join(triggered) if triggered else "ASM/GSM surveillance flag"
         card.score  = cap_score

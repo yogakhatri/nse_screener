@@ -4,6 +4,7 @@ Serializes StockRating to the canonical JSON / dict structure.
 """
 from __future__ import annotations
 import json
+from .config import template_display_name
 from .models import StockRating
 
 def to_dict(rating: StockRating) -> dict:
@@ -28,8 +29,7 @@ def to_dict(rating: StockRating) -> dict:
             "industry":       cls.industry,
             "basic_industry": cls.basic_industry,
         },
-        "template_used":    f"Template {rating.template.value} "
-                            f"({'General' if rating.template.value=='A' else 'Bank' if rating.template.value=='B' else 'NBFC/HFC'})",
+        "template_used":    f"Template {rating.template.value} ({template_display_name(rating.template.value)})",
         "peer_group": {
             "level":   rating.peer_level.value,
             "n_peers": rating.n_peers,
@@ -62,6 +62,9 @@ def to_dict(rating: StockRating) -> dict:
         "selection_score":         rating.selection_score,
         "investability_gate_passed": rating.investability_gate_passed,
         "gate_fail_reasons":       rating.gate_fail_reasons,
+        "template_supported":      rating.template_supported,
+        "template_support_status": rating.template_support_status,
+        "template_support_reasons": rating.template_support_reasons,
         "staged_entry_plan":       rating.staged_entry_plan,
         "action_note":             rating.action_note,
         "ranks": {

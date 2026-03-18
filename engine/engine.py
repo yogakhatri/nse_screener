@@ -5,21 +5,18 @@ Wires together: template routing → peer resolution → card scoring → aggreg
 from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List, Optional
-from .config import (TEMPLATE_BANKS, TEMPLATE_NBFC)
+from .config import infer_template_code_from_basic_industry, validate_runtime_config
 from .models import (RawStockData, StockRating, Template, NSEClassification, PeerLevel)
 from .peer_group import resolve_peer_group
 from .cards import (score_performance, score_valuation, score_growth,
-                    score_profitability, score_entry_point, score_red_flags)
+                    score_profitability, score_entry_point, score_red_flags,
+                    validate_metric_direction_map)
 from .aggregator import compute_opportunity_score
 from .advanced import infer_market_mode, apply_advanced_overlays
 from .output import to_dict, to_json
 
 def _assign_template(basic_industry: str) -> Template:
-    if basic_industry in TEMPLATE_BANKS:
-        return Template.BANK
-    if basic_industry in TEMPLATE_NBFC:
-        return Template.NBFC
-    return Template.GENERAL
+    return Template(infer_template_code_from_basic_industry(basic_industry))
 
 class NSERatingEngine:
     """
@@ -32,6 +29,8 @@ class NSERatingEngine:
         stock_data: dict of {ticker: RawStockData}
         All stocks must have ≥ 252 trading days of price history (pre-filtered).
         """
+        validate_runtime_config()
+        validate_metric_direction_map()
         self.stocks = stock_data
         self.requested_market_mode = market_mode
         self.market_mode = infer_market_mode(stock_data, market_mode)
@@ -115,7 +114,7 @@ class NSERatingEngine:
 
     def to_leaderboard(
         self, ratings: Dict[str, StockRating],
-        exclude_statuses=("Uninvestable", "Insufficient Data")
+        exclude_statuses=("Uninvestable", "Insufficient Data", "Unsupported Data")
     ) -> List[dict]:
         """Return sorted list of rating dicts by Opportunity Score (desc)."""
         rows = []
@@ -154,6 +153,9 @@ class NSERatingEngine:
                 "selection_score":     r.selection_score,
                 "gate_passed":         r.investability_gate_passed,
                 "gate_fail_reasons":   "; ".join(r.gate_fail_reasons),
+                "template_supported":  r.template_supported,
+                "template_support_status": r.template_support_status,
+                "template_support_reason": "; ".join(r.template_support_reasons),
                 "staged_entry_plan":   r.staged_entry_plan,
                 "action_note":         r.action_note,
                 "sector_rank":         r.sector_rank,

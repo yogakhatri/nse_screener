@@ -42,7 +42,7 @@ def score_metric(
         return None
     arr = np.array([v for v in peer_series if v is not None], dtype=float)
     if len(arr) == 0:
-        return None
+        return 50.0
     arr_w = winsorize_peer(np.append(arr, stock_value))
     stock_w = arr_w[-1]
     peers_w = arr_w[:-1]
@@ -79,4 +79,3 @@ def weighted_card_score(
     # weighted_sum is already in 0-100 range since sub_scores are 0-100
     card_score = round(weighted_sum / total_weight_with_data, 2)
     return card_score, coverage, True
-
