@@ -116,12 +116,12 @@ def score_red_flags(stock, peers, template):
 
     # ── Raw disqualifier inputs ──
     # These values should be raw levels (not percentile-scored values).
-    pledge_pct = f.get("promoter_pledge")
-    gnpa_pct = f.get("gnpa_pct", f.get("gnpa_nnpa_stress_raw"))
+    pledge_pct = f.get("pledge_pct") if f.get("pledge_pct") is not None else f.get("promoter_pledge")
+    gnpa_pct = f.get("gnpa_pct") if f.get("gnpa_pct") is not None else f.get("gnpa_nnpa_stress_raw")
     nnpa_pct = f.get("nnpa_pct")
-    car_pct = f.get("car_pct", f.get("capital_adequacy_stress_raw"))
-    pcr_pct = f.get("pcr_pct", f.get("pcr_weakness_raw"))
-    alm_st_pct = f.get("alm_st_pct", f.get("alm_mismatch_raw"))
+    car_pct = f.get("car_pct") if f.get("car_pct") is not None else f.get("capital_adequacy_stress_raw")
+    pcr_pct = f.get("pcr_pct") if f.get("pcr_pct") is not None else f.get("pcr_weakness_raw")
+    alm_st_pct = f.get("alm_st_pct") if f.get("alm_st_pct") is not None else f.get("alm_mismatch_raw")
     avg_turnover_cr = f.get("avg_daily_turnover_cr")
     interest_coverage = f.get("interest_coverage")
     credit_rating_grade = f.get("credit_rating_grade")

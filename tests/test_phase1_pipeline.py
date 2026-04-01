@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from engine import NSEClassification, RawStockData
+from engine import NSEClassification, RawStockData, Template
+from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS, validate_runtime_config
+from engine.metric_definitions import compute_default_distress
 from engine.scoring import score_metric
 from scripts.load_data import load_from_screener, metric_coverage, validate_loader_support
 from scripts.prepare_universe import _build_universe_frame, _finalize_output, _merge_fundamentals
@@ -252,6 +254,93 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertNotEqual(stock.fundamentals["return_6m"], 999.0)
             self.assertNotEqual(stock.fundamentals["price_vs_50dma"], 999.0)
             self.assertIsNotNone(stock.price_history)
+
+    def test_default_distress_treats_unrated_as_conservative_not_default(self) -> None:
+        risk, is_disq = compute_default_distress(
+            debt_to_equity=1.2,
+            interest_coverage_ttm=2.5,
+            credit_rating_grade=None,
+        )
+        self.assertEqual(risk, 25.0)
+        self.assertFalse(is_disq)
+
+    def test_load_from_screener_prefers_internal_iv_over_external_intrinsic_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "AAA",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                        "Current Price": "100",
+                        "Intrinsic Value": "500",
+                        "EPS FY0": "10",
+                        "EPS FY1": "11",
+                        "EPS FY2": "9",
+                        "EPS TTM": "10",
+                        "Book Value Per Share": "40",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["AAA"]
+            self.assertAlmostEqual(stock.fundamentals["iv_gap"], -20.0, places=2)
+            self.assertAlmostEqual(stock.fundamentals["discount_to_iv"], -20.0, places=2)
+
+    def test_load_from_screener_derives_bank_roe_adjusted_pb(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "BANK1",
+                        "Name": "BANK1",
+                        "Macro Sector": "Financial Services",
+                        "Sector": "Financial Services",
+                        "Industry": "Banking",
+                        "Basic Industry": "Private Sector Bank",
+                        "Current Price": "100",
+                        "Price to Book value": "2.0",
+                        "ROE": "16",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["BANK1"]
+            self.assertAlmostEqual(stock.fundamentals["roe_adj_pb"], 0.125, places=6)
+            self.assertIsNotNone(stock.fundamentals["fair_value_gap"])
+            self.assertIsNotNone(stock.fundamentals["discount_to_fair_pb"])
+
+    def test_red_flags_uses_raw_pledge_percentage_for_disqualifier(self) -> None:
+        stock = _stock(
+            "AAA",
+            fundamentals={
+                metric: 10.0
+                for metric in CARD_WEIGHTS["A"]["red_flags"]
+            },
+        )
+        stock.fundamentals.update(
+            {
+                "promoter_pledge": 75.0,
+                "pledge_pct": 20.0,
+                "asm_stage": 0,
+                "gsm_stage": 0,
+                "interest_coverage": 4.0,
+                "credit_rating_grade": 2.0,
+                "avg_daily_turnover_cr": 10.0,
+                "governance_events": [],
+            }
+        )
+        peers = [
+            _stock("PEER1", fundamentals={metric: 15.0 for metric in CARD_WEIGHTS["A"]["red_flags"]}),
+            _stock("PEER2", fundamentals={metric: 5.0 for metric in CARD_WEIGHTS["A"]["red_flags"]}),
+        ]
+        card = score_red_flags(stock, peers, Template.GENERAL)
+        self.assertNotEqual(card.label, "Severe")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import pandas as pd
 
+from engine.metric_definitions import (
+    compute_cagr_3y,
+    compute_drawdown_recovery,
+    compute_fcf_consistency,
+    compute_growth_stability,
+    compute_margin_trend,
+    compute_yoy_growth,
+)
+
 try:
     import requests
     from lxml import html as lxml_html
@@ -61,11 +70,12 @@ OUTPUT_COLUMNS = [
     "P/E", "Price to Book value", "EV / EBITDA", "FCF Yield",
     "Sales growth 3Years", "Profit growth 3Years",
     "Sales growth", "Profit growth",          # YoY
-    "ROCE 3Years", "OPM", "ROA",
+    "ROCE 3Years", "OPM", "ROA", "ROE",
     "Pledged percentage",
     "1 Year Return", "6 Month Return", "5 Year CAGR",
     "Relative Strength", "Drawdown Recovery",
     "Forward Growth", "Current Price", "Intrinsic Value",
+    "Book Value Per Share", "EPS TTM", "EPS FY0", "EPS FY1", "EPS FY2",
     "RSI", "Price vs 200 DMA", "Price vs 50 DMA",
     "Delivery Score", "RS Turn", "Volatility Compression",
     "Debt to equity", "Interest Coverage",
@@ -73,6 +83,8 @@ OUTPUT_COLUMNS = [
     "ASM Stage", "GSM Stage",
     # Bank-specific extras (empty for non-banks)
     "NIM", "GNPA %", "NNPA %", "CAR %", "PCR %",
+    "Advances Growth", "Deposit Growth", "NII Growth", "Fee Income Growth", "Earnings Growth",
+    "AUM Growth", "Cost to Income", "Credit Cost", "Slippage Ratio",
     "Margin Trend", "CFO/PAT", "FCF Consistency", "Growth Stability",
 ]
 
@@ -196,6 +208,44 @@ def _pct_positive(values: list) -> Optional[float]:
     return round(sum(1 for v in vals if v > 0) / len(vals) * 100, 1)
 
 
+def _annual_values(values: list, headers: list[str]) -> list[Optional[float]]:
+    """Extract annual values from a list of values and corresponding headers."""
+    data_headers = headers[1:1 + len(values)] if headers else []
+    annual = []
+    for idx, value in enumerate(values):
+        header = data_headers[idx] if idx < len(data_headers) else ""
+        if header and "TTM" in header.upper():
+            continue
+        annual.append(_f(value))
+    return annual
+
+
+def _quarterly_ttm_yoy_pct(values: list) -> Optional[float]:
+    """Compute YoY growth from quarterly TTM values."""
+    parsed = [_f(v) for v in values[:8]]
+    if len(parsed) < 8 or any(v is None for v in parsed):
+        return None
+    growth = compute_yoy_growth(sum(parsed[:4]), sum(parsed[4:8]))
+    if growth is None:
+        return None
+    return round(growth * 100.0, 1)
+
+
+def _quarterly_spot_yoy_pct(values: list) -> Optional[float]:
+    """Compute YoY growth from quarterly spot values."""
+    parsed = [_f(v) for v in values[:5]]
+    if len(parsed) < 5:
+        return None
+    latest = parsed[0]
+    year_ago = parsed[4]
+    if latest is None or year_ago is None or year_ago <= 0:
+        return None
+    growth = compute_yoy_growth(latest, year_ago)
+    if growth is None:
+        return None
+    return round(growth * 100.0, 1)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Core scraper — single stock
 # ──────────────────────────────────────────────────────────────────────────────
@@ -276,14 +326,21 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
     bv = _f(row.get("_book_value"))
     if cp and bv and bv > 0:
         row["Price to Book value"] = round(cp / bv, 2)
+        row["Book Value Per Share"] = round(bv, 2)
+    roe_val = _f(row.get("_roe"))
+    if roe_val is not None:
+        row["ROE"] = roe_val
+    pe_val = _f(row.get("P/E"))
+    if cp and pe_val and pe_val > 0 and "EPS TTM" not in row:
+        row["EPS TTM"] = round(cp / pe_val, 2)
 
     # 52-week hi/lo → Drawdown Recovery
     hi = _f(row.get("_52w_high"))
     lo = _f(row.get("_52w_low"))
-    if cp and hi and hi > 0:
-        row["1 Year Return"] = round((cp / hi - 1) * 100, 1)  # distance from 52w high as proxy
-    if cp and lo and lo > 0:
-        row["Drawdown Recovery"] = round((cp / lo - 1) * 100, 1)
+    if cp is not None and hi is not None and lo is not None:
+        drawdown = compute_drawdown_recovery(cp, hi, lo)
+        if drawdown is not None:
+            row["Drawdown Recovery"] = round(drawdown, 1)
 
     # ── Profit & Loss table ───────────────────────────────────────────────────
     pl_tables = tree.xpath('//section[@id="profit-loss"]//table')
@@ -296,39 +353,35 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         # Sales / Revenue
         sales_row = _find_row(pl, "Sales", "Revenue", "Net Sales", "Total Revenue")
         if sales_row and len(sales_row) >= 4:
-            s = [_f(v) for v in sales_row]
-            s_valid = [v for v in s if v is not None]
-            if len(s_valid) >= 4:
-                # 3Y CAGR
-                oldest = s_valid[-4] if len(s_valid) >= 4 else None
-                newest = s_valid[-1]
-                if oldest and oldest > 0 and newest:
-                    row["Sales growth 3Years"] = round(((newest / oldest) ** (1/3) - 1) * 100, 1)
-                # YoY
-                if len(s_valid) >= 2 and s_valid[-2] > 0:
-                    row["Sales growth"] = round((s_valid[-1] / s_valid[-2] - 1) * 100, 1)
+            annual_sales = _annual_values(sales_row, pl_headers)
+            valid_sales = [v for v in annual_sales if v is not None]
+            if len(valid_sales) >= 4:
+                sales_cagr = compute_cagr_3y(valid_sales[-1], valid_sales[-4])
+                if sales_cagr is not None:
+                    row["Sales growth 3Years"] = round(sales_cagr * 100.0, 1)
+            if len(valid_sales) >= 5:
+                stability = compute_growth_stability(valid_sales[-5:])
+                if stability is not None:
+                    row["Growth Stability"] = round(stability, 1)
 
         # Net Profit
         pat_row = _find_row(pl, "Net Profit", "PAT", "Profit after tax")
         if pat_row:
-            p = [_f(v) for v in pat_row]
-            p_valid = [v for v in p if v is not None]
-            if len(p_valid) >= 4:
-                oldest = p_valid[-4]
-                newest = p_valid[-1]
-                if oldest and abs(oldest) > 0 and newest:
-                    row["Profit growth 3Years"] = round(((newest / oldest) ** (1/3) - 1) * 100, 1)
-            if len(p_valid) >= 2 and abs(p_valid[-2]) > 0:
-                row["Profit growth"] = round((p_valid[-1] / p_valid[-2] - 1) * 100, 1)
+            annual_pat = _annual_values(pat_row, pl_headers)
+            valid_pat = [v for v in annual_pat if v is not None]
+            if len(valid_pat) >= 4:
+                pat_cagr = compute_cagr_3y(valid_pat[-1], valid_pat[-4])
+                if pat_cagr is not None:
+                    row["Profit growth 3Years"] = round(pat_cagr * 100.0, 1)
 
         # OPM %
         opm_row = _find_row(pl, "OPM %", "EBITDA Margin", "Operating Profit Margin", "OPM")
         if opm_row:
-            opm_vals = [_f(v) for v in opm_row]
-            opm_valid = [v for v in opm_vals if v is not None]
+            annual_opm = _annual_values(opm_row, pl_headers)
+            opm_valid = [v for v in annual_opm if v is not None]
             if opm_valid:
                 row["OPM"] = opm_valid[-1]
-                slope = _linear_trend(opm_row)
+                slope = compute_margin_trend(opm_valid[-3:])
                 if slope is not None:
                     row["Margin Trend"] = round(slope, 2)
 
@@ -342,19 +395,28 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         # EPS / 5Y price CAGR proxy from EPS
         eps_row = _find_row(pl, "EPS in Rs", "EPS", "Basic EPS")
         if eps_row:
-            eps_vals = [_f(v) for v in eps_row if _f(v) is not None]
-            if len(eps_vals) >= 5 and abs(eps_vals[0]) > 0 and eps_vals[-1]:
-                row["5 Year CAGR"] = round(((eps_vals[-1] / eps_vals[0]) ** 0.2 - 1) * 100, 1)
+            header_vals = pl_headers[1:1 + len(eps_row)] if pl_headers else []
+            annual_eps = []
+            for idx, value in enumerate(eps_row):
+                header = header_vals[idx] if idx < len(header_vals) else ""
+                parsed = _f(value)
+                if header and "TTM" in header.upper():
+                    if parsed is not None:
+                        row["EPS TTM"] = parsed
+                    continue
+                annual_eps.append(parsed)
+            annual_eps = [v for v in annual_eps if v is not None]
+            if annual_eps:
+                row["EPS FY0"] = annual_eps[-1]
+            if len(annual_eps) >= 2:
+                row["EPS FY1"] = annual_eps[-2]
+            if len(annual_eps) >= 3:
+                row["EPS FY2"] = annual_eps[-3]
 
         # Dividend payout
         div_row = _find_row(pl, "Dividend Payout %", "Dividend %")
         if div_row:
             div_vals = [_f(v) for v in div_row if _f(v) is not None]
-            # used internally if needed
-
-        # Growth stability from 5Y sales CAGR consistency
-        if sales_row:
-            row["Growth Stability"] = _pct_positive(sales_row[-5:])
 
     # ── Balance Sheet ─────────────────────────────────────────────────────────
     bs_tables = tree.xpath('//section[@id="balance-sheet"]//table')
@@ -379,38 +441,79 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         inv_row = _find_row(cf, "Cash from Investing Activity", "Investing Cash Flow")
         pat_row_cf = _find_row(cf, "Net Profit", "PAT")
 
+        cfo_vals = []
         if cfo_row:
             cfo_vals = [_f(v) for v in cfo_row if _f(v) is not None]
             if inv_row:
                 inv_vals = [_f(v) for v in inv_row if _f(v) is not None]
-                # FCF = CFO + Investing (investing is typically negative capex)
-                fcf_pairs = list(zip(cfo_vals[-5:], inv_vals[-5:])) if len(inv_vals) >= 2 else []
-                if fcf_pairs:
-                    row["FCF Consistency"] = round(
-                        sum(1 for c, i in fcf_pairs if c + i > 0) / len(fcf_pairs) * 100, 1
-                    )
-                    # FCF Yield proxy: latest FCF / Market Cap
-                    mc = _f(row.get("_market_cap_cr"))
-                    if mc and mc > 0 and fcf_pairs:
-                        latest_fcf = fcf_pairs[-1][0] + fcf_pairs[-1][1]
-                        row["FCF Yield"] = round(latest_fcf / mc * 100, 2)
+                fcf_annual = [c + i for c, i in zip(cfo_vals[-5:], inv_vals[-5:])]
+                fcf_consistency = compute_fcf_consistency(fcf_annual)
+                if fcf_consistency is not None:
+                    row["FCF Consistency"] = round(fcf_consistency, 1)
+                mc = _f(row.get("_market_cap_cr"))
+                if mc and mc > 0 and fcf_annual:
+                    latest_fcf = fcf_annual[-1]
+                    row["FCF Yield"] = round(latest_fcf / mc * 100, 2)
 
-            # CFO/PAT from last available year
-            if pat_row_cf:
-                pat_cf_vals = [_f(v) for v in pat_row_cf if _f(v) is not None]
-            else:
-                pat_cf_vals = []
+        # CFO/PAT from last available year
+        if pat_row_cf:
+            pat_cf_vals = [_f(v) for v in pat_row_cf if _f(v) is not None]
+        else:
+            pat_cf_vals = []
 
-            if cfo_vals and pat_cf_vals:
-                cfo_last = cfo_vals[-1]
-                pat_last = pat_cf_vals[-1]
-                if pat_last and pat_last != 0:
-                    row["CFO/PAT"] = round(cfo_last / pat_last, 2)
+        if cfo_vals and pat_cf_vals:
+            cfo_last = cfo_vals[-1]
+            pat_last = pat_cf_vals[-1]
+            if pat_last and pat_last != 0:
+                row["CFO/PAT"] = round(cfo_last / pat_last, 2)
 
     # ── Quarters table ────────────────────────────────────────────────────────
     q_tables = tree.xpath('//section[@id="quarters"]//table')
     if q_tables:
         q = _table_to_dict(q_tables[0])
+
+        sales_q = _find_row(q, "Sales", "Revenue", "Net Sales", "Total Revenue")
+        if sales_q:
+            sales_growth = _quarterly_ttm_yoy_pct(sales_q)
+            if sales_growth is not None:
+                row["Sales growth"] = sales_growth
+
+        profit_q = _find_row(q, "Net Profit", "PAT", "Profit after tax")
+        if profit_q:
+            profit_growth = _quarterly_ttm_yoy_pct(profit_q)
+            if profit_growth is not None:
+                row["Profit growth"] = profit_growth
+                row["Earnings Growth"] = profit_growth
+
+        nii_q = _find_row(q, "Net Interest Income", "NII")
+        if nii_q:
+            nii_growth = _quarterly_ttm_yoy_pct(nii_q)
+            if nii_growth is not None:
+                row["NII Growth"] = nii_growth
+
+        fee_q = _find_row(q, "Fee Income", "Non Interest Income", "Other Income")
+        if fee_q:
+            fee_growth = _quarterly_ttm_yoy_pct(fee_q)
+            if fee_growth is not None:
+                row["Fee Income Growth"] = fee_growth
+
+        advances_q = _find_row(q, "Advances", "Gross Advances", "Loan Book")
+        if advances_q:
+            advances_growth = _quarterly_spot_yoy_pct(advances_q)
+            if advances_growth is not None:
+                row["Advances Growth"] = advances_growth
+
+        deposits_q = _find_row(q, "Deposits", "Total Deposits")
+        if deposits_q:
+            deposit_growth = _quarterly_spot_yoy_pct(deposits_q)
+            if deposit_growth is not None:
+                row["Deposit Growth"] = deposit_growth
+
+        aum_q = _find_row(q, "AUM", "Assets Under Management")
+        if aum_q:
+            aum_growth = _quarterly_spot_yoy_pct(aum_q)
+            if aum_growth is not None:
+                row["AUM Growth"] = aum_growth
 
         # RSI proxy from quarterly price changes (not available on screener pages)
         # Skip — RSI is better from price data
@@ -422,18 +525,6 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
                 vals = [_f(v) for v in opm_q if _f(v) is not None]
                 if vals:
                     row["OPM"] = vals[0]
-
-    # ── ROCE from ratios / data section ───────────────────────────────────────
-    roce_el = tree.xpath(
-        '//*[contains(text(),"ROCE")]/../following-sibling::*[1] | '
-        '//*[contains(@class,"roce")]'
-    )
-    if "ROCE 3Years" not in row and roce_el:
-        for el in roce_el:
-            v = _f(el.text_content())
-            if v is not None:
-                row["ROCE 3Years"] = v
-                break
 
     # ── Shareholding — Promoter Pledge ───────────────────────────────────────
     shp_tables = tree.xpath('//section[@id="shareholding"]//table')
@@ -454,12 +545,34 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             v = _f(val[0].text_content())
             if "NIM" in lbl:
                 row["NIM"] = v
+            elif "ROE" in lbl:
+                row["ROE"] = v
             elif "GNPA" in lbl or "Gross NPA" in lbl:
                 row["GNPA %"] = v
             elif "NNPA" in lbl or "Net NPA" in lbl:
                 row["NNPA %"] = v
             elif "CAR" in lbl or "Capital Adequacy" in lbl:
                 row["CAR %"] = v
+            elif "PCR" in lbl or "Provision Coverage" in lbl:
+                row["PCR %"] = v
+            elif "Cost to Income" in lbl or "Cost/Income" in lbl:
+                row["Cost to Income"] = v
+            elif "Credit Cost" in lbl:
+                row["Credit Cost"] = v
+            elif "Slippage" in lbl:
+                row["Slippage Ratio"] = v
+            elif "Advances Growth" in lbl or "Loan Book Growth" in lbl:
+                row["Advances Growth"] = v
+            elif "Deposit Growth" in lbl:
+                row["Deposit Growth"] = v
+            elif "NII Growth" in lbl or "Net Interest Income Growth" in lbl:
+                row["NII Growth"] = v
+            elif "Fee Income Growth" in lbl or "Non Interest Income Growth" in lbl:
+                row["Fee Income Growth"] = v
+            elif "AUM Growth" in lbl:
+                row["AUM Growth"] = v
+            elif "Earnings Growth" in lbl:
+                row["Earnings Growth"] = v
 
     # ── Intrinsic value (shown as "Intrinsic Value" in top box) ──────────────
     if "Intrinsic Value" not in row:

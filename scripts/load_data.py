@@ -24,11 +24,13 @@ from engine.metric_definitions import (
     compute_fair_pb,
     compute_fair_value_gap,
     compute_gnpa_nnpa_stress,
+    compute_iv_general,
     compute_iv_gap,
     compute_liquidity_risk,
     compute_car_stress,
     compute_pcr_weakness,
     compute_alm_mismatch,
+    compute_promoter_pledge_risk,
     compute_governance_risk,
     m_score_to_raw_risk,
     LOCKED_COE_BANK,
@@ -82,8 +84,8 @@ DIRECT_ALIASES = {
     "fcf_consistency": ["FCF Consistency", "Positive FCF %"],
     "roe": ["ROE", "Return on Equity"],
     "nim": ["NIM", "Net Interest Margin"],
-    "cost_to_income": ["Cost to Income", "Cost/Income"],
-    "provision_coverage": ["Provision Coverage", "PCR"],
+    "cost_to_income": ["Cost to Income", "Cost/Income", "Cost-to-Income"],
+    "provision_coverage": ["Provision Coverage", "PCR", "PCR %"],
     "credit_cost_discipline": ["Credit Cost", "Credit Cost Ratio"],
     "discount_to_iv": ["Discount to IV", "IV Gap"],
     "rsi_state": ["RSI", "RSI 14", "RSI(14)"],
@@ -107,6 +109,12 @@ DIRECT_ALIASES = {
 RAW_ALIASES = {
     "close_price": ["Current Price", "CMP", "Close Price", "Price"],
     "intrinsic_value": ["Intrinsic Value", "Estimated Intrinsic Value", "Fair Value"],
+    "pledge_pct": ["Pledged percentage", "Promoter Pledge", "Promoter Pledge %"],
+    "book_value_per_share": ["Book Value Per Share", "Book Value", "BVPS"],
+    "eps_ttm": ["EPS TTM", "EPS (TTM)", "TTM EPS"],
+    "eps_fy0": ["EPS FY0", "EPS Latest FY", "EPS FY"],
+    "eps_fy1": ["EPS FY1", "EPS FY-1"],
+    "eps_fy2": ["EPS FY2", "EPS FY-2"],
     "debt_to_equity": ["Debt to equity", "Debt/Equity", "D/E"],
     "interest_coverage": ["Interest Coverage", "Interest coverage ratio", "ICR"],
     "credit_rating_grade": ["Credit Rating Grade", "Rating Grade"],
@@ -281,7 +289,21 @@ def _apply_price_history_metrics(
 
 def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> tuple[bool, bool]:
     close_price = raw.get("close_price")
-    intrinsic_value = raw.get("intrinsic_value")
+    pledge_pct = raw.get("pledge_pct")
+    if pledge_pct is not None:
+        fundamentals["promoter_pledge"] = compute_promoter_pledge_risk(pledge_pct)
+
+    intrinsic_value = None
+    if template_hint == "A":
+        intrinsic_value = compute_iv_general(
+            eps_fy0=raw.get("eps_fy0"),
+            eps_fy1=raw.get("eps_fy1"),
+            eps_fy2=raw.get("eps_fy2"),
+            eps_ttm=raw.get("eps_ttm"),
+            bvps=raw.get("book_value_per_share"),
+        )
+    if intrinsic_value is None:
+        intrinsic_value = raw.get("intrinsic_value")
     if fundamentals.get("iv_gap") is None and close_price is not None and intrinsic_value is not None:
         fundamentals["iv_gap"] = compute_iv_gap(close_price, intrinsic_value)
     if fundamentals.get("discount_to_iv") is None and fundamentals.get("iv_gap") is not None:
@@ -289,7 +311,9 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
 
     roe_ttm = raw.get("roe_ttm")
     pb_now = fundamentals.get("pb_percentile")
-    if pb_now is not None and roe_ttm is not None:
+    if template_hint in {"B", "C"} and pb_now is not None and roe_ttm is not None and roe_ttm > 0:
+        if fundamentals.get("roe_adj_pb") is None:
+            fundamentals["roe_adj_pb"] = pb_now / roe_ttm
         coe = LOCKED_COE_NBFC if template_hint == "C" else LOCKED_COE_BANK
         fair_pb = compute_fair_pb(roe_ttm, coe=coe)
         fair_gap = compute_fair_value_gap(pb_now, fair_pb)
@@ -422,6 +446,7 @@ def load_from_screener(
         fundamentals["nnpa_pct"] = raw.get("nnpa_pct")
         fundamentals["car_pct"] = raw.get("car_pct")
         fundamentals["pcr_pct"] = raw.get("pcr_pct")
+        fundamentals["pledge_pct"] = raw.get("pledge_pct")
         fundamentals["alm_st_pct"] = raw.get("alm_st_pct")
         fundamentals["avg_daily_turnover_cr"] = raw.get("avg_daily_turnover_cr")
         fundamentals["interest_coverage"] = raw.get("interest_coverage")

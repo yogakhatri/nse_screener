@@ -37,6 +37,13 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from engine.metric_definitions import (
+    compute_fcf_consistency as canonical_fcf_consistency,
+    compute_growth_stability as canonical_growth_stability,
+    compute_margin_trend as canonical_margin_trend,
+    compute_yoy_growth,
+)
+
 # ---------------------------------------------------------------------------
 # Column alias helpers (match the loader's normalisation)
 # ---------------------------------------------------------------------------
@@ -65,6 +72,27 @@ def _safe_float(value) -> Optional[float]:
         return None
 
 
+def _annual_values(values: list[str], headers: list[str]) -> list[Optional[float]]:
+    data_headers = headers[1:1 + len(values)] if headers else []
+    annual = []
+    for idx, value in enumerate(values):
+        header = data_headers[idx] if idx < len(data_headers) else ""
+        if header and "TTM" in header.upper():
+            continue
+        annual.append(_safe_float(value))
+    return annual
+
+
+def _quarterly_ttm_yoy_pct(values: list[str]) -> Optional[float]:
+    parsed = [_safe_float(v) for v in values[:8]]
+    if len(parsed) < 8 or any(v is None for v in parsed):
+        return None
+    growth = compute_yoy_growth(sum(parsed[:4]), sum(parsed[4:8]))
+    if growth is None:
+        return None
+    return round(growth * 100.0, 2)
+
+
 # ---------------------------------------------------------------------------
 # Metric computation from available data
 # ---------------------------------------------------------------------------
@@ -74,10 +102,6 @@ def compute_rev_growth_yoy(row: pd.Series, col_map: dict) -> Optional[float]:
     direct = _safe_float(row.get(col_map.get("sales_growth_yoy", ""), None))
     if direct is not None:
         return direct
-    # Approximate from 3Y CAGR: assume latest year grew at CAGR rate
-    cagr_3y = _safe_float(row.get(col_map.get("sales_growth_3y", ""), None))
-    if cagr_3y is not None:
-        return cagr_3y  # best proxy: 3Y CAGR as YoY estimate
     return None
 
 
@@ -86,9 +110,6 @@ def compute_eps_growth_yoy(row: pd.Series, col_map: dict) -> Optional[float]:
     direct = _safe_float(row.get(col_map.get("profit_growth_yoy", ""), None))
     if direct is not None:
         return direct
-    cagr_3y = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
-    if cagr_3y is not None:
-        return cagr_3y
     return None
 
 
@@ -103,16 +124,6 @@ def compute_cfo_pat_ratio(row: pd.Series, col_map: dict) -> Optional[float]:
     pat = _safe_float(row.get(col_map.get("pat", ""), None))
     if cfo is not None and pat is not None and pat != 0:
         return round(cfo / pat, 2)
-    # Heuristic: FCF Yield > 0 and ROA > 0 suggests decent cash conversion
-    fcf_yield = _safe_float(row.get(col_map.get("fcf_yield", ""), None))
-    roa = _safe_float(row.get(col_map.get("roa", ""), None))
-    if fcf_yield is not None and roa is not None:
-        if fcf_yield > 3 and roa > 5:
-            return 1.1  # strong cash conversion proxy
-        elif fcf_yield > 0 and roa > 0:
-            return 0.8  # moderate cash conversion
-        elif fcf_yield < 0:
-            return 0.3  # weak cash conversion
     return None
 
 
@@ -121,24 +132,6 @@ def compute_margin_trend(row: pd.Series, col_map: dict) -> Optional[float]:
     direct = _safe_float(row.get(col_map.get("margin_trend", ""), None))
     if direct is not None:
         return direct
-    # Use OPM + profit growth as proxy: if profits growing faster than sales, margins expanding
-    opm = _safe_float(row.get(col_map.get("opm", ""), None))
-    profit_growth = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
-    sales_growth = _safe_float(row.get(col_map.get("sales_growth_3y", ""), None))
-    if profit_growth is not None and sales_growth is not None:
-        # Margin expansion if profit growth exceeds sales growth
-        margin_delta = profit_growth - sales_growth
-        return round(margin_delta / 3.0, 2)  # annualised delta
-    if opm is not None:
-        # If we only have current OPM, estimate trend from ROCE trend
-        roce = _safe_float(row.get(col_map.get("roce_3y", ""), None))
-        if roce is not None:
-            if roce > 20 and opm > 15:
-                return 1.0  # stable high margins
-            elif roce > 12:
-                return 0.5
-            else:
-                return -0.5
     return None
 
 
@@ -147,46 +140,7 @@ def compute_fcf_consistency(row: pd.Series, col_map: dict) -> Optional[float]:
     direct = _safe_float(row.get(col_map.get("fcf_consistency", ""), None))
     if direct is not None:
         return direct
-    # Heuristic from FCF Yield, ROA, and debt profile
-    fcf_yield = _safe_float(row.get(col_map.get("fcf_yield", ""), None))
-    roa = _safe_float(row.get(col_map.get("roa", ""), None))
-    roce = _safe_float(row.get(col_map.get("roce_3y", ""), None))
-    de = _safe_float(row.get(col_map.get("debt_to_equity", ""), None))
-
-    score_points = 0
-    data_points = 0
-
-    if fcf_yield is not None:
-        data_points += 1
-        if fcf_yield > 3:
-            score_points += 1
-        elif fcf_yield > 0:
-            score_points += 0.7
-
-    if roa is not None:
-        data_points += 1
-        if roa > 8:
-            score_points += 1
-        elif roa > 3:
-            score_points += 0.6
-
-    if roce is not None:
-        data_points += 1
-        if roce > 18:
-            score_points += 1
-        elif roce > 10:
-            score_points += 0.6
-
-    if de is not None:
-        data_points += 1
-        if de < 0.5:
-            score_points += 1  # low debt = more likely consistent FCF
-        elif de < 1.0:
-            score_points += 0.6
-
-    if data_points < 2:
-        return None
-    return round((score_points / data_points) * 100, 1)
+    return None
 
 
 def compute_growth_stability(row: pd.Series, col_map: dict) -> Optional[float]:
@@ -194,43 +148,7 @@ def compute_growth_stability(row: pd.Series, col_map: dict) -> Optional[float]:
     direct = _safe_float(row.get(col_map.get("growth_stability", ""), None))
     if direct is not None:
         return direct
-    # Use consistency between different growth metrics as stability proxy
-    sales_3y = _safe_float(row.get(col_map.get("sales_growth_3y", ""), None))
-    profit_3y = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
-    roce = _safe_float(row.get(col_map.get("roce_3y", ""), None))
-    opm = _safe_float(row.get(col_map.get("opm", ""), None))
-
-    signals = []
-    if sales_3y is not None:
-        signals.append(sales_3y)
-    if profit_3y is not None:
-        signals.append(profit_3y)
-
-    if len(signals) < 2:
-        return None
-
-    # Growth stability = how close profit growth tracks revenue growth
-    # + bonus for high ROCE (indicates sustainable competitive advantage)
-    spread = abs(signals[0] - signals[1])
-    avg_growth = np.mean(signals)
-
-    if avg_growth <= 0:
-        base = 25.0  # declining company
-    elif spread < 5:
-        base = 80.0  # very consistent
-    elif spread < 15:
-        base = 60.0  # moderately consistent
-    elif spread < 30:
-        base = 40.0  # inconsistent
-    else:
-        base = 20.0  # very inconsistent
-
-    if roce is not None and roce > 18:
-        base = min(100, base + 10)
-    if opm is not None and opm > 15:
-        base = min(100, base + 5)
-
-    return round(base, 1)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -271,39 +189,19 @@ def scrape_screener_company(symbol: str, session=None) -> dict:
             quarters_tables = tree.xpath('//section[@id="quarters"]//table')
             if quarters_tables:
                 qtr_table = quarters_tables[0]
-                headers = [h.text_content().strip() for h in qtr_table.xpath('.//thead/tr/th')]
                 rows_data = {}
                 for tr in qtr_table.xpath('.//tbody/tr'):
                     cells = [td.text_content().strip().replace(",", "") for td in tr.xpath('td')]
                     if cells:
                         rows_data[cells[0]] = cells[1:]
 
-                # Latest quarter vs same quarter last year
-                if "Sales" in rows_data and len(rows_data["Sales"]) >= 5:
-                    sales = rows_data["Sales"]
-                    latest = _safe_float(sales[0]) if sales else None
-                    year_ago = _safe_float(sales[4]) if len(sales) > 4 else None
-                    if latest and year_ago and year_ago > 0:
-                        result["Sales growth"] = round((latest / year_ago - 1) * 100, 2)
+                sales_growth = _quarterly_ttm_yoy_pct(rows_data.get("Sales", []))
+                if sales_growth is not None:
+                    result["Sales growth"] = sales_growth
 
-                if "Net Profit" in rows_data and len(rows_data["Net Profit"]) >= 5:
-                    profit = rows_data["Net Profit"]
-                    latest = _safe_float(profit[0]) if profit else None
-                    year_ago = _safe_float(profit[4]) if len(profit) > 4 else None
-                    if latest and year_ago and year_ago > 0:
-                        result["Profit growth"] = round((latest / year_ago - 1) * 100, 2)
-
-                # OPM from quarterly data for margin trend
-                if "OPM %" in rows_data and len(rows_data["OPM %"]) >= 5:
-                    opm_vals = [_safe_float(v) for v in rows_data["OPM %"][:5]]
-                    valid_opm = [v for v in opm_vals if v is not None]
-                    if len(valid_opm) >= 3:
-                        # Simple linear regression for trend
-                        xs = np.arange(len(valid_opm), dtype=float)
-                        ys = np.array(valid_opm)
-                        if np.std(ys) > 1e-9:
-                            slope = float(np.polyfit(xs, ys, 1)[0])
-                            result["Margin Trend"] = round(slope, 2)
+                profit_growth = _quarterly_ttm_yoy_pct(rows_data.get("Net Profit", []))
+                if profit_growth is not None:
+                    result["Profit growth"] = profit_growth
         except Exception:
             pass
 
@@ -312,6 +210,7 @@ def scrape_screener_company(symbol: str, session=None) -> dict:
             profit_loss = tree.xpath('//section[@id="profit-loss"]//table')
             if profit_loss:
                 pl_table = profit_loss[0]
+                pl_headers = [h.text_content().strip() for h in pl_table.xpath('.//thead/tr/th')]
                 pl_rows = {}
                 for tr in pl_table.xpath('.//tbody/tr'):
                     cells = [td.text_content().strip().replace(",", "") for td in tr.xpath('td')]
@@ -320,8 +219,22 @@ def scrape_screener_company(symbol: str, session=None) -> dict:
 
                 # Net Profit for last 5 years
                 if "Net Profit" in pl_rows:
-                    np_vals = [_safe_float(v) for v in pl_rows["Net Profit"][-5:]]
+                    np_vals = _annual_values(pl_rows["Net Profit"], pl_headers)[-5:]
                     result["_annual_net_profit"] = np_vals
+
+                if "Sales" in pl_rows:
+                    annual_sales = [v for v in _annual_values(pl_rows["Sales"], pl_headers) if v is not None]
+                    if len(annual_sales) >= 5:
+                        stability = canonical_growth_stability(annual_sales[-5:])
+                        if stability is not None:
+                            result["Growth Stability"] = round(stability, 1)
+
+                if "OPM %" in pl_rows:
+                    annual_opm = [v for v in _annual_values(pl_rows["OPM %"], pl_headers) if v is not None]
+                    if len(annual_opm) >= 2:
+                        margin_trend = canonical_margin_trend(annual_opm[-3:])
+                        if margin_trend is not None:
+                            result["Margin Trend"] = round(margin_trend, 2)
         except Exception:
             pass
 
@@ -349,16 +262,10 @@ def scrape_screener_company(symbol: str, session=None) -> dict:
                 if "Cash from Operating Activity" in cf_rows and "Cash from Investing Activity" in cf_rows:
                     cfo_list = [_safe_float(v) for v in cf_rows["Cash from Operating Activity"][-5:]]
                     inv_list = [_safe_float(v) for v in cf_rows["Cash from Investing Activity"][-5:]]
-                    fcf_positive = 0
-                    fcf_total = 0
-                    for cfo_v, inv_v in zip(cfo_list, inv_list):
-                        if cfo_v is not None and inv_v is not None:
-                            fcf = cfo_v + inv_v  # investing is negative
-                            fcf_total += 1
-                            if fcf > 0:
-                                fcf_positive += 1
-                    if fcf_total >= 3:
-                        result["FCF Consistency"] = round(fcf_positive / fcf_total * 100, 1)
+                    fcf_list = [cfo_v + inv_v for cfo_v, inv_v in zip(cfo_list, inv_list) if cfo_v is not None and inv_v is not None]
+                    fcf_consistency = canonical_fcf_consistency(fcf_list)
+                    if fcf_consistency is not None:
+                        result["FCF Consistency"] = round(fcf_consistency, 1)
 
         except Exception:
             pass

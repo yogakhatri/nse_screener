@@ -1,8 +1,16 @@
 SHELL := /bin/bash
 
 VENV := .venv
+# In CI (GitHub Actions sets CI=true), use system Python that already has
+# packages installed via pip install -r requirements.txt.  Locally, use the
+# project venv so system packages stay clean.
+ifeq ($(CI),true)
+PYTHON := python
+PIP    := pip
+else
 PYTHON := $(VENV)/bin/python
-PIP := $(VENV)/bin/pip
+PIP    := $(VENV)/bin/pip
+endif
 
 RUN_DATE ?= $(shell date +%F)
 MODE ?= live
@@ -62,7 +70,11 @@ help:
 	@echo "  make clean-generated               Remove generated run/log artifacts"
 
 venv:
+ifeq ($(CI),true)
+	@:  # CI uses system Python; no venv needed
+else
 	@test -d "$(VENV)" || python3 -m venv "$(VENV)"
+endif
 
 setup: venv
 	@$(PYTHON) -m pip install --upgrade pip

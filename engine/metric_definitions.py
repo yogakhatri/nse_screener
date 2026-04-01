@@ -738,7 +738,6 @@ def compute_asm_gsm_risk(asm_stage: int, gsm_stage: int) -> Tuple[float, bool]:
 
 
 # ── 7C. Default / Distress Risk ───────────────────────────────────────
-# Composite of financial ratio signals + credit rating
 # Input fields: debt_to_equity, interest_coverage_ttm, credit_rating_grade (int 1-10)
 # credit_rating_grade: 1=AAA, 2=AA, 3=A, 4=BBB (investment grade floor),
 #                      5=BB, 6=B, 7=C, 8=D/Default, 9=unrated_small, 10=unknown
@@ -750,7 +749,7 @@ DISTRESS_RULES = [
     ("high_leverage",        lambda de, ic, cr: de is not None and 3.0 < de <= 5.0,  20.0, False),
     ("weak_coverage",        lambda de, ic, cr: ic is not None and 1.0 <= ic < 1.5,  20.0, False),
     ("sub_investment_grade", lambda de, ic, cr: cr is not None and cr >= 5,           25.0, False),
-    ("default_rated",        lambda de, ic, cr: cr is not None and cr >= 8,          100.0, True),   # DISQUALIFIER
+    ("default_rated",        lambda de, ic, cr: cr is not None and cr == 8,          100.0, True),   # DISQUALIFIER
 ]
 
 def compute_default_distress(debt_to_equity: Optional[float],
@@ -772,10 +771,15 @@ def compute_default_distress(debt_to_equity: Optional[float],
                   → adds 25 to distress score (conservative assumption for unrated companies)
     RETURNS   : (raw_risk_0_to_100, is_disqualifier: bool)
     """
+    effective_rating = credit_rating_grade
+    if effective_rating is None and (
+        debt_to_equity is not None or interest_coverage_ttm is not None
+    ):
+        effective_rating = 9
     total_risk = 0.0
     is_disq = False
     for label, cond, contrib, disq in DISTRESS_RULES:
-        if cond(debt_to_equity, interest_coverage_ttm, credit_rating_grade):
+        if cond(debt_to_equity, interest_coverage_ttm, effective_rating):
             total_risk += contrib
             if disq:
                 is_disq = True
@@ -1048,7 +1052,7 @@ def check_all_disqualifiers(
         triggered.append(f"ASM Stage {asm_stage} active")
     if interest_coverage is not None and interest_coverage < 1.0:
         triggered.append(f"Interest Coverage {interest_coverage:.2f}x < 1.0")
-    if credit_rating_grade is not None and credit_rating_grade >= 8:
+    if credit_rating_grade is not None and credit_rating_grade == 8:
         triggered.append(f"Credit Rating in Default category (grade {credit_rating_grade})")
     if pledge_pct is not None and pledge_pct > PLEDGE_DISQUALIFIER_THRESHOLD:
         triggered.append(f"Promoter Pledge {pledge_pct:.1f}% > 60%")
