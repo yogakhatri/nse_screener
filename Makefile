@@ -29,6 +29,7 @@ BHAVCOPY_ZIP ?=
 SCRAPER_DELAY ?= 1.5
 SCRAPER_LIMIT ?= 0
 SCRAPER_WORKERS ?= 1
+SCRAPER_FORCE_REFRESH ?= false
 
 .DEFAULT_GOAL := help
 
@@ -132,7 +133,8 @@ fetch-screener-data: venv
 		--date "$(RUN_DATE)" \
 		--delay "$(SCRAPER_DELAY)" \
 		--limit "$(SCRAPER_LIMIT)" \
-		--workers "$(SCRAPER_WORKERS)"
+		--workers "$(SCRAPER_WORKERS)" \
+		$(if $(filter true,$(SCRAPER_FORCE_REFRESH)),--force-refresh,)
 
 prepare-csv: bootstrap
 	@if [ -f "$(SCREENER_CSV)" ]; then \
@@ -250,21 +252,22 @@ daily-run: venv
 	@echo "=== Fetch Universe ==="
 	@$(MAKE) fetch-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" BHAVCOPY_ZIP="$(BHAVCOPY_ZIP)" CLASSIFICATION_CSV="$(CLASSIFICATION_CSV)" MISSING_CLASSIFICATION_CSV="$(MISSING_CLASSIFICATION_CSV)" REQUIRE_CLASSIFICATION="$(REQUIRE_CLASSIFICATION)"
 	@echo "=== Fetch Fundamentals (screener.in scrape) ==="
-	@if [ ! -f "$(SCREENER_CSV)" ]; then \
-		$(MAKE) fetch-screener-data RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPER_DELAY="$(SCRAPER_DELAY)" SCRAPER_WORKERS="$(SCRAPER_WORKERS)"; \
-	else \
-		echo "Screener CSV already exists: $(SCREENER_CSV)"; \
-	fi
-	@FUND_FILE="$(FUNDAMENTALS_CSV)"; \
-	if [ -z "$$FUND_FILE" ]; then FUND_FILE="$(SCREENER_CSV)"; fi; \
-	if [ -f "$$FUND_FILE" ] && [ -s "$$FUND_FILE" ] && [ "$$(wc -l < "$$FUND_FILE")" -gt 1 ] && head -n 1 "$$FUND_FILE" | grep -q ','; then \
-		echo "=== Production Mode ==="; \
+	@$(MAKE) fetch-screener-data RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPER_DELAY="$(SCRAPER_DELAY)" SCRAPER_LIMIT="$(SCRAPER_LIMIT)" SCRAPER_WORKERS="$(SCRAPER_WORKERS)" SCRAPER_FORCE_REFRESH="$(SCRAPER_FORCE_REFRESH)"
+	@SCRAPED_FILE="$(SCREENER_CSV)"; \
+	FUND_FILE="$(FUNDAMENTALS_CSV)"; \
+	if [ -n "$$FUND_FILE" ] && [ "$$FUND_FILE" != "$$SCRAPED_FILE" ] && [ -f "$$FUND_FILE" ] && [ -s "$$FUND_FILE" ] && [ "$$(wc -l < "$$FUND_FILE")" -gt 1 ] && head -n 1 "$$FUND_FILE" | grep -q ','; then \
+		echo "=== Production Mode (explicit fundamentals file) ==="; \
 		echo "Using fundamentals file: $$FUND_FILE"; \
 		$(MAKE) prepare-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" FUNDAMENTALS_CSV="$$FUND_FILE" SCREENER_CSV="$(SCREENER_CSV)"; \
 		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
 		$(MAKE) run RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \
+	elif [ -f "$$SCRAPED_FILE" ] && [ -s "$$SCRAPED_FILE" ] && [ "$$(wc -l < "$$SCRAPED_FILE")" -gt 1 ] && head -n 1 "$$SCRAPED_FILE" | grep -q ','; then \
+		echo "=== Debug Mode (scraper-built fundamentals) ==="; \
+		echo "Using scraped file directly: $$SCRAPED_FILE"; \
+		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
+		$(MAKE) run-debug RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \
 	else \
-		echo "=== Debug Mode (no fundamentals file) ==="; \
+		echo "=== Debug Mode (universe only; no usable fundamentals file) ==="; \
 		$(MAKE) prepare-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" SCREENER_CSV="$(SCREENER_CSV)"; \
 		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
 		$(MAKE) run-debug RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \

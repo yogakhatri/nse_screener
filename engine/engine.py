@@ -10,7 +10,7 @@ from .models import (RawStockData, StockRating, Template, NSEClassification, Pee
 from .peer_group import resolve_peer_group
 from .cards import (score_performance, score_valuation, score_growth,
                     score_profitability, score_entry_point, score_red_flags,
-                    validate_metric_direction_map)
+                    score_contrarian, validate_metric_direction_map)
 from .aggregator import compute_opportunity_score
 from .advanced import infer_market_mode, apply_advanced_overlays
 from .output import to_dict, to_json
@@ -59,9 +59,10 @@ class NSERatingEngine:
         rating.growth        = score_growth(stock, peers, template)
         rating.profitability = score_profitability(stock, peers, template)
         rating.entry_point   = score_entry_point(stock, peers, template)
+        rating.contrarian    = score_contrarian(stock, peers, template)
         rating.red_flags     = score_red_flags(stock, peers, template)
 
-        rating = compute_opportunity_score(rating)
+        rating = compute_opportunity_score(rating, market_mode=self.market_mode)
         return rating
 
     def rate_universe(self) -> Dict[str, StockRating]:
@@ -133,6 +134,7 @@ class NSERatingEngine:
                 "growth":              r.growth.score,
                 "profitability":       r.profitability.score,
                 "entry_point":         r.entry_point.score,
+                "contrarian":          r.contrarian.score,
                 "red_flags":           r.red_flags.score,
                 "opportunity_score":   r.opportunity_score,
                 "investability_status":r.investability_status,

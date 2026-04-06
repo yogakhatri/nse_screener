@@ -5,6 +5,7 @@ from engine.advanced import action_sheet_rows, portfolio_plan_rows
 from engine.bias_controls import BiasAudit
 from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS
+from engine.metric_definitions import compute_cagr_3y
 from engine.models import Template
 
 
@@ -137,6 +138,14 @@ class PhaseUpgradeTests(unittest.TestCase):
         peers = [_make_stock("PEER1", pe=26.0, growth=1.0), _make_stock("PEER2", pe=24.0, growth=2.0)]
         card = score_red_flags(stock, peers, Template.GENERAL)
         self.assertEqual(card.label, "Severe")
+
+    def test_cagr_3y_returns_none_for_negative_latest_value(self) -> None:
+        self.assertIsNone(compute_cagr_3y(-4.18, 2.28))
+
+    def test_cagr_3y_still_computes_for_positive_values(self) -> None:
+        val = compute_cagr_3y(27.0, 8.0)
+        self.assertIsNotNone(val)
+        self.assertGreater(val, 0)
 
 
 if __name__ == "__main__":

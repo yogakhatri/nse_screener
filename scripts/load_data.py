@@ -23,6 +23,7 @@ from engine.metric_definitions import (
     compute_default_distress,
     compute_fair_pb,
     compute_fair_value_gap,
+    compute_forward_view,
     compute_gnpa_nnpa_stress,
     compute_iv_general,
     compute_iv_gap,
@@ -33,6 +34,12 @@ from engine.metric_definitions import (
     compute_promoter_pledge_risk,
     compute_governance_risk,
     m_score_to_raw_risk,
+    compute_piotroski_f_score,
+    compute_earnings_yield,
+    compute_dividend_yield_score,
+    compute_promoter_buying,
+    compute_operating_leverage_score,
+    compute_margin_expansion,
     LOCKED_COE_BANK,
     LOCKED_COE_NBFC,
 )
@@ -104,6 +111,13 @@ DIRECT_ALIASES = {
     "slippages_stress": ["Slippage Ratio", "Slippages Stress"],
     "governance_promoter": ["Governance Promoter Risk", "Promoter Governance Risk"],
     "surveillance_default": ["Surveillance Default Risk"],
+    # Contrarian / Deep Value — CSV pass-through if scraper pre-computed them
+    "piotroski_f_score":       ["Piotroski F-Score", "Piotroski Score", "F-Score"],
+    "earnings_yield":          ["Earnings Yield Score", "Earnings Yield"],
+    "dividend_yield_score":    ["Dividend Yield Score"],
+    "promoter_buying":         ["Promoter Buying Signal", "Promoter Buying"],
+    "operating_leverage_score":["Operating Leverage Score", "Op Leverage Score"],
+    "margin_expansion":        ["Margin Expansion Score", "Margin Expansion"],
 }
 
 RAW_ALIASES = {
@@ -130,6 +144,23 @@ RAW_ALIASES = {
     "governance_events": ["Governance Events", "Governance Flags"],
     "beneish_m_score": ["Beneish M Score", "Beneish M-Score"],
     "roe_ttm": ["ROE", "ROE TTM"],
+    # Deep Value / Contrarian raw inputs (populated by scraper)
+    "current_ratio":          ["Current Ratio", "CR"],
+    "current_ratio_fy1":      ["Current Ratio Prev Year", "Current Ratio FY1"],
+    "dividend_yield":         ["Dividend Yield", "Div Yield %", "Yield %"],
+    "promoter_holding_pct":   ["Promoter Holding %", "Promoter %", "Promoter Holdings"],
+    "promoter_holding_prev":  ["Promoter Holding Prev %", "Promoter Prev Quarter %"],
+    "dii_holding_pct":        ["DII %", "DII Holding %", "DII Holdings"],
+    "gross_block_fy0":        ["Gross Block", "Fixed Assets Gross", "Gross Block FY0"],
+    "gross_block_fy3":        ["Gross Block 3Y Ago", "Gross Block FY3"],
+    "asset_turnover":         ["Asset Turnover", "Assets Turnover"],
+    "asset_turnover_fy1":     ["Asset Turnover Prev Year", "Asset Turnover FY1"],
+    "opm_fy1":                ["OPM FY1", "OPM Prev Year", "Operating Margin FY1"],
+    "opm_fy2":                ["OPM FY2", "OPM 2Y Ago", "Operating Margin FY2"],
+    "roa_fy0":                ["ROA", "Return on Assets"],
+    "roa_fy1":                ["ROA Prev Year", "ROA FY1"],
+    "de_fy1":                 ["D/E Prev Year", "Debt to Equity FY1", "D/E FY1"],
+    "cfo_annual":             ["Cash from Operations", "CFO Annual", "Operating Cash Flow Annual"],
 }
 
 CLASSIFICATION_ALIASES = {
@@ -157,6 +188,13 @@ DERIVED_METRICS = {
     "governance_promoter",
     "surveillance_default",
     "accounting_quality",
+    # Contrarian / Deep Value — computed in _fill_derived_metrics
+    "piotroski_f_score",
+    "earnings_yield",
+    "dividend_yield_score",
+    "promoter_buying",
+    "operating_leverage_score",
+    "margin_expansion",
 }
 RAW_PRICE_METRICS = {
     "close_price",
@@ -181,13 +219,16 @@ def _norm(name: str) -> str:
 def _first_present(row: pd.Series, aliases: Iterable[str]) -> Optional[object]:
     normalized = {_norm(c): c for c in row.index}
     for alias in aliases:
-        key = normalized.get(_norm(alias))
-        if key is None:
-            continue
-        value = row.get(key)
-        if pd.isna(value):
-            continue
-        return value
+        for candidate in (alias, f"fund__{alias}"):
+            key = normalized.get(_norm(candidate))
+            if key is None:
+                continue
+            value = row.get(key)
+            if pd.isna(value):
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
     return None
 
 
@@ -309,6 +350,22 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
     if fundamentals.get("discount_to_iv") is None and fundamentals.get("iv_gap") is not None:
         fundamentals["discount_to_iv"] = fundamentals["iv_gap"]
 
+    if fundamentals.get("forward_view") is None:
+        eps_forward_growth = None
+        eps_fy0 = raw.get("eps_fy0")
+        eps_fy1 = raw.get("eps_fy1")
+        eps_ttm = raw.get("eps_ttm")
+        if eps_fy1 is not None and eps_fy0 is not None and eps_fy0 != 0:
+            eps_forward_growth = ((eps_fy1 / eps_fy0) - 1.0) * 100.0
+        elif eps_fy0 is not None and eps_ttm is not None and eps_ttm != 0:
+            eps_forward_growth = ((eps_fy0 / eps_ttm) - 1.0) * 100.0
+        rev_forward_growth = fundamentals.get("earnings_growth")
+        if rev_forward_growth is None:
+            rev_forward_growth = fundamentals.get("eps_growth_yoy")
+        forward_view = compute_forward_view(eps_forward_growth, rev_forward_growth)
+        if forward_view is not None:
+            fundamentals["forward_view"] = round(forward_view, 2)
+
     roe_ttm = raw.get("roe_ttm")
     pb_now = fundamentals.get("pb_percentile")
     if template_hint in {"B", "C"} and pb_now is not None and roe_ttm is not None and roe_ttm > 0:
@@ -370,6 +427,54 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
         acc_risk, _ = m_score_to_raw_risk(m_score)
         fundamentals["accounting_quality"] = acc_risk
 
+    # ── Contrarian / Deep Value metrics ──────────────────────────────────────
+    if fundamentals.get("piotroski_f_score") is None:
+        fundamentals["piotroski_f_score"] = compute_piotroski_f_score(
+            roa_fy0=fundamentals.get("roa"),
+            cfo=raw.get("cfo_annual"),
+            roa_fy1=raw.get("roa_fy1"),
+            cfo_pat_ratio=fundamentals.get("cfo_pat_ratio"),
+            debt_to_equity_fy0=raw.get("debt_to_equity"),
+            debt_to_equity_fy1=raw.get("de_fy1"),
+            current_ratio_fy0=raw.get("current_ratio"),
+            current_ratio_fy1=raw.get("current_ratio_fy1"),
+            gross_margin_fy0=fundamentals.get("ebitda_margin"),
+            gross_margin_fy1=raw.get("opm_fy1"),
+            asset_turnover_fy0=raw.get("asset_turnover"),
+            asset_turnover_fy1=raw.get("asset_turnover_fy1"),
+        )
+
+    if fundamentals.get("earnings_yield") is None:
+        fundamentals["earnings_yield"] = compute_earnings_yield(
+            pe_ratio=fundamentals.get("pe_percentile"),
+        )
+
+    if fundamentals.get("dividend_yield_score") is None:
+        fundamentals["dividend_yield_score"] = compute_dividend_yield_score(
+            dividend_yield_pct=raw.get("dividend_yield"),
+        )
+
+    if fundamentals.get("promoter_buying") is None:
+        fundamentals["promoter_buying"] = compute_promoter_buying(
+            promoter_holding_pct=raw.get("promoter_holding_pct"),
+            promoter_holding_prev_pct=raw.get("promoter_holding_prev"),
+        )
+
+    if fundamentals.get("operating_leverage_score") is None:
+        fundamentals["operating_leverage_score"] = compute_operating_leverage_score(
+            gross_block_fy0=raw.get("gross_block_fy0"),
+            gross_block_fy3=raw.get("gross_block_fy3"),
+            asset_turnover=raw.get("asset_turnover"),
+        )
+
+    if fundamentals.get("margin_expansion") is None:
+        fundamentals["margin_expansion"] = compute_margin_expansion(
+            opm_fy0=fundamentals.get("ebitda_margin"),
+            opm_fy1=raw.get("opm_fy1"),
+            opm_fy2=raw.get("opm_fy2"),
+            rev_growth_yoy=fundamentals.get("rev_growth_yoy"),
+        )
+
     on_asm = raw.get("asm_stage", 0) > 0
     on_gsm = raw.get("gsm_stage", 0) > 0
     return on_asm, on_gsm
@@ -427,11 +532,16 @@ def load_from_screener(
         if not ticker:
             continue
 
+        industry = _get_text(row, CLASSIFICATION_ALIASES["industry"], "Diversified")
+        basic_industry = _get_text(row, CLASSIFICATION_ALIASES["basic_industry"], "")
+        if not basic_industry or basic_industry.strip().lower() == "diversified":
+            basic_industry = industry
+
         classification = NSEClassification(
             macro_sector=_get_text(row, CLASSIFICATION_ALIASES["macro_sector"], "Diversified"),
             sector=_get_text(row, CLASSIFICATION_ALIASES["sector"], "Diversified"),
-            industry=_get_text(row, CLASSIFICATION_ALIASES["industry"], "Diversified"),
-            basic_industry=_get_text(row, CLASSIFICATION_ALIASES["basic_industry"], "Diversified"),
+            industry=industry,
+            basic_industry=basic_industry,
         )
 
         fundamentals = _init_fundamentals()

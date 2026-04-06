@@ -179,6 +179,14 @@ CARD_WEIGHTS = {
             "liquidity_manipulation": 0.12,
             "governance_event": 0.10,
         },
+        "contrarian": {
+            "piotroski_f_score": 0.25,
+            "earnings_yield": 0.20,
+            "dividend_yield_score": 0.15,
+            "promoter_buying": 0.20,
+            "operating_leverage_score": 0.10,
+            "margin_expansion": 0.10,
+        },
     },
     "B": {
         "performance": {
@@ -228,6 +236,12 @@ CARD_WEIGHTS = {
             "slippages_stress": 0.15,
             "governance_promoter": 0.10,
             "surveillance_default": 0.23,
+        },
+        "contrarian": {
+            "piotroski_f_score": 0.30,
+            "earnings_yield": 0.25,
+            "dividend_yield_score": 0.20,
+            "promoter_buying": 0.25,
         },
     },
     "C": {
@@ -279,6 +293,12 @@ CARD_WEIGHTS = {
             "governance_promoter": 0.10,
             "surveillance_default": 0.23,
         },
+        "contrarian": {
+            "piotroski_f_score": 0.30,
+            "earnings_yield": 0.25,
+            "dividend_yield_score": 0.20,
+            "promoter_buying": 0.25,
+        },
     },
 }
 
@@ -290,11 +310,23 @@ CARD_WEIGHTS = {
 # In down markets, profitability + valuation are the best drawdown protectors,
 # so they have slightly higher influence.
 OPPORTUNITY_WEIGHTS = {
+    "valuation": 0.22,
+    "growth": 0.18,
+    "profitability": 0.22,
+    "entry_point": 0.15,
+    "performance": 0.15,
+    "contrarian": 0.08,
+}
+
+# Bear-market opportunity weights: momentum and growth de-emphasised;
+# contrarian (Piotroski quality, earnings yield, promoter buying) heavily weighted.
+BEAR_OPPORTUNITY_WEIGHTS = {
     "valuation": 0.24,
-    "growth": 0.20,
-    "profitability": 0.24,
-    "entry_point": 0.16,
-    "performance": 0.16,
+    "growth": 0.10,
+    "profitability": 0.20,
+    "entry_point": 0.10,
+    "performance": 0.08,
+    "contrarian": 0.28,
 }
 
 # Potential-first lens (long-term compounding quality).
@@ -450,6 +482,13 @@ CARD_LABELS = {
         (60, 80, "Low"),
         (80, 100, "None"),
     ],
+    "contrarian": [
+        (0, 20, "None"),
+        (20, 40, "Weak"),
+        (40, 60, "Moderate"),
+        (60, 80, "Strong"),
+        (80, 100, "Very Strong"),
+    ],
 }
 
 # Red flag caps map red-flag card score to max allowed opportunity score.
@@ -480,6 +519,7 @@ SUPPORTED_CARD_NAMES = (
     "profitability",
     "entry_point",
     "red_flags",
+    "contrarian",
 )
 TEMPLATE_DISPLAY_NAMES = {
     "A": "General",
@@ -494,7 +534,7 @@ def configured_template_codes() -> tuple[str, ...]:
 
 
 def configured_core_cards() -> tuple[str, ...]:
-    return tuple(OPPORTUNITY_WEIGHTS.keys())
+    return tuple(card for card in OPPORTUNITY_WEIGHTS.keys() if card != "contrarian")
 
 
 def infer_template_code_from_basic_industry(basic_industry: str) -> str:
@@ -538,6 +578,7 @@ def validate_runtime_config() -> None:
 
     composite_weight_sets = {
         "OPPORTUNITY_WEIGHTS": OPPORTUNITY_WEIGHTS,
+        "BEAR_OPPORTUNITY_WEIGHTS": BEAR_OPPORTUNITY_WEIGHTS,
         "POTENTIAL_SCORE_WEIGHTS": POTENTIAL_SCORE_WEIGHTS,
         "VALUATION_GAP_SCORE_WEIGHTS": VALUATION_GAP_SCORE_WEIGHTS,
         "SECTOR_REGIME_WEIGHTS": SECTOR_REGIME_WEIGHTS,

@@ -37,6 +37,9 @@ METRIC_DIRECTION = {
     "capital_adequacy_stress":False,"slippages_stress":False,
     "governance_promoter":False,"surveillance_default":False,
     "alm_mismatch":False,
+    # Contrarian / Deep Value — ALL True (higher = more attractive)
+    "piotroski_f_score":True,"earnings_yield":True,"dividend_yield_score":True,
+    "promoter_buying":True,"operating_leverage_score":True,"margin_expansion":True,
 }
 
 
@@ -103,6 +106,9 @@ def score_profitability(stock, peers, template):
 
 def score_entry_point(stock, peers, template):
     return _score_card("entry_point", stock, peers, template)
+
+def score_contrarian(stock, peers, template):
+    return _score_card("contrarian", stock, peers, template)
 
 def score_red_flags(stock, peers, template):
     """

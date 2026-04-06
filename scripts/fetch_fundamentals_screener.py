@@ -33,6 +33,7 @@ import json
 import sys
 import time
 import random
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -76,9 +77,14 @@ OUTPUT_COLUMNS = [
     "Relative Strength", "Drawdown Recovery",
     "Forward Growth", "Current Price", "Intrinsic Value",
     "Book Value Per Share", "EPS TTM", "EPS FY0", "EPS FY1", "EPS FY2",
+    "Dividend Yield", "Current Ratio", "Current Ratio Prev Year",
+    "Gross Block", "Gross Block 3Y Ago",
+    "Asset Turnover", "Asset Turnover Prev Year",
+    "Cash from Operations", "ROA Prev Year",
+    "Promoter Holding %", "Promoter Holding Prev %", "DII %",
     "RSI", "Price vs 200 DMA", "Price vs 50 DMA",
     "Delivery Score", "RS Turn", "Volatility Compression",
-    "Debt to equity", "Interest Coverage",
+    "Debt to equity", "D/E Prev Year", "Interest Coverage",
     "Credit Rating Grade", "Avg Daily Turnover Cr",
     "ASM Stage", "GSM Stage",
     # Bank-specific extras (empty for non-banks)
@@ -87,6 +93,8 @@ OUTPUT_COLUMNS = [
     "AUM Growth", "Cost to Income", "Credit Cost", "Slippage Ratio",
     "Margin Trend", "CFO/PAT", "FCF Consistency", "Growth Stability",
 ]
+
+CACHE_SCHEMA_VERSION = 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -137,7 +145,9 @@ def _table_to_dict(table_el) -> dict[str, list[str]]:
     for tr in table_el.xpath('.//tbody/tr'):
         cells = [td.text_content().strip().replace(",", "") for td in tr.xpath('td')]
         if cells and cells[0]:
-            rows[cells[0].strip()] = cells[1:]
+            # Normalize: screener.in appends '\xa0+' footnote markers to many row labels
+            key = cells[0].strip().replace("\xa0", " ").rstrip(" +").strip()
+            rows[key] = cells[1:]
     return rows
 
 
@@ -256,19 +266,29 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
     """
     row: dict = {"NSE Symbol": symbol}
 
-    # Try consolidated first, then standalone
+    # Try consolidated first, then standalone; retry on 429/503
+    resp = None
     for url in [
         f"https://www.screener.in/company/{quote(symbol, safe='')}/consolidated/",
         f"https://www.screener.in/company/{quote(symbol, safe='')}/",
     ]:
-        try:
-            resp = session.get(url, timeout=20)
-            if resp.status_code == 200:
+        for attempt in range(4):
+            try:
+                r = session.get(url, timeout=20)
+                if r.status_code == 200:
+                    resp = r
+                    break
+                if r.status_code in (429, 503):
+                    backoff = (2 ** attempt) * 5 + random.uniform(0, 2)
+                    time.sleep(backoff)
+                    continue
+                break  # 404 or other — no point retrying this URL
+            except Exception:
                 break
-        except Exception:
-            continue
-    else:
-        return row  # all attempts failed
+        if resp is not None:
+            break
+    if resp is None:
+        return row
 
     try:
         tree = lxml_html.fromstring(resp.content)
@@ -280,14 +300,16 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
     if name_el:
         row["Name"] = name_el[0].text_content().strip()
 
-    # ── Classification from breadcrumbs / company info ────────────────────────
-    for a in tree.xpath('//div[contains(@class,"company-info")]//a | //div[@id="company-info"]//a'):
-        href = a.get("href", "")
-        text = a.text_content().strip()
-        if "/industries/" in href:
-            row.setdefault("Industry", text)
-        elif "/sectors/" in href:
-            row.setdefault("Sector", text)
+    # ── Classification — screener.in uses title= attributes on /market/ links
+    for title_attr, col in [
+        ("Broad Sector", "Macro Sector"),
+        ("Sector", "Sector"),
+        ("Broad Industry", "Basic Industry"),
+        ("Industry", "Industry"),
+    ]:
+        els = tree.xpath(f'//a[@title="{title_attr}"]')
+        if els:
+            row[col] = els[0].text_content().strip()
 
     # ── Top-ratios box ─────────────────────────────────────────────────────────
     top = _top_ratios(tree)
@@ -296,6 +318,8 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         "Stock P/E":            "P/E",
         "P/E":                  "P/E",
         "Price to Earning":     "P/E",
+        "EV / EBITDA":         "EV / EBITDA",
+        "EV/EBITDA":           "EV / EBITDA",
         "Book Value":           "_book_value",  # need price to compute P/B
         "Dividend Yield":       "_div_yield",
         "ROCE":                 "ROCE 3Years",
@@ -327,6 +351,9 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
     if cp and bv and bv > 0:
         row["Price to Book value"] = round(cp / bv, 2)
         row["Book Value Per Share"] = round(bv, 2)
+    div_yield_val = _f(row.get("_div_yield"))
+    if div_yield_val is not None:
+        row["Dividend Yield"] = div_yield_val
     roe_val = _f(row.get("_roe"))
     if roe_val is not None:
         row["ROE"] = roe_val
@@ -355,6 +382,10 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         if sales_row and len(sales_row) >= 4:
             annual_sales = _annual_values(sales_row, pl_headers)
             valid_sales = [v for v in annual_sales if v is not None]
+            if valid_sales:
+                row["_sales_fy0"] = valid_sales[-1]
+            if len(valid_sales) >= 2:
+                row["_sales_fy1"] = valid_sales[-2]
             if len(valid_sales) >= 4:
                 sales_cagr = compute_cagr_3y(valid_sales[-1], valid_sales[-4])
                 if sales_cagr is not None:
@@ -384,6 +415,10 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
                 slope = compute_margin_trend(opm_valid[-3:])
                 if slope is not None:
                     row["Margin Trend"] = round(slope, 2)
+            if len(opm_valid) >= 2:
+                row["OPM FY1"] = opm_valid[-2]
+            if len(opm_valid) >= 3:
+                row["OPM FY2"] = opm_valid[-3]
 
         # ROA (if directly present)
         roa_row = _find_row(pl, "ROA", "Return on Assets")
@@ -391,6 +426,8 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             roa_vals = [_f(v) for v in roa_row if _f(v) is not None]
             if roa_vals:
                 row["ROA"] = roa_vals[-1]
+            if len(roa_vals) >= 2:
+                row["ROA Prev Year"] = roa_vals[-2]
 
         # EPS / 5Y price CAGR proxy from EPS
         eps_row = _find_row(pl, "EPS in Rs", "EPS", "Basic EPS")
@@ -422,6 +459,7 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
     bs_tables = tree.xpath('//section[@id="balance-sheet"]//table')
     if bs_tables:
         bs = _table_to_dict(bs_tables[0])
+        bs_headers = [th.text_content().strip() for th in bs_tables[0].xpath('.//thead/tr/th')]
 
         borrow_row = _find_row(bs, "Borrowings", "Total Debt", "Long-term borrowings")
         equity_row = _find_row(bs, "Equity Capital", "Total Equity", "Shareholders Equity")
@@ -431,6 +469,47 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             e = _f(equity_row[-1]) if equity_row else None
             if b is not None and e and e > 0:
                 row["Debt to equity"] = round(b / e, 2)
+            # D/E previous year for Piotroski F5
+            if len(borrow_row) >= 2 and len(equity_row) >= 2:
+                b1 = _f(borrow_row[-2]) if len(borrow_row) >= 2 else None
+                e1 = _f(equity_row[-2]) if len(equity_row) >= 2 else None
+                if b1 is not None and e1 is not None and e1 > 0:
+                    row["D/E Prev Year"] = round(b1 / e1, 2)
+
+        # Current assets & liabilities → Current Ratio
+        ca_row = _find_row(bs, "Other Assets", "Current Assets", "Total Current Assets")
+        cl_row = _find_row(bs, "Other Liabilities", "Current Liabilities", "Total Current Liabilities")
+        if ca_row and cl_row:
+            ca = _f(ca_row[-1])
+            cl = _f(cl_row[-1])
+            if ca is not None and cl is not None and cl > 0:
+                row["Current Ratio"] = round(ca / cl, 2)
+            if len(ca_row) >= 2 and len(cl_row) >= 2:
+                ca1 = _f(ca_row[-2])
+                cl1 = _f(cl_row[-2])
+                if ca1 is not None and cl1 is not None and cl1 > 0:
+                    row["Current Ratio Prev Year"] = round(ca1 / cl1, 2)
+
+        # Gross Block (FY0 and FY3 for Operating Leverage Score)
+        gb_row = _find_row(bs, "Fixed Assets", "Gross Block", "Net Fixed Assets")
+        if gb_row:
+            gb_annual = _annual_values(gb_row, bs_headers)
+            gb_valid = [v for v in gb_annual if v is not None]
+            if gb_valid:
+                row["Gross Block"] = gb_valid[-1]
+            if len(gb_valid) >= 4:
+                row["Gross Block 3Y Ago"] = gb_valid[-4]
+
+        # Asset Turnover = Revenue / Total Assets
+        ta_row = _find_row(bs, "Total Assets", "Balance Sheet Total")
+        if ta_row:
+            ta_vals = [_f(v) for v in ta_row if _f(v) is not None]
+            sales_fy0 = _f(row.get("_sales_fy0"))
+            sales_fy1 = _f(row.get("_sales_fy1"))
+            if ta_vals and sales_fy0 and ta_vals[-1] and ta_vals[-1] > 0:
+                row["Asset Turnover"] = round(sales_fy0 / ta_vals[-1], 2)
+            if len(ta_vals) >= 2 and sales_fy1 and ta_vals[-2] and ta_vals[-2] > 0:
+                row["Asset Turnover Prev Year"] = round(sales_fy1 / ta_vals[-2], 2)
 
     # ── Cash Flow ─────────────────────────────────────────────────────────────
     cf_tables = tree.xpath('//section[@id="cash-flow"]//table')
@@ -466,6 +545,7 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             pat_last = pat_cf_vals[-1]
             if pat_last and pat_last != 0:
                 row["CFO/PAT"] = round(cfo_last / pat_last, 2)
+            row["Cash from Operations"] = cfo_last
 
     # ── Quarters table ────────────────────────────────────────────────────────
     q_tables = tree.xpath('//section[@id="quarters"]//table')
@@ -526,7 +606,7 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
                 if vals:
                     row["OPM"] = vals[0]
 
-    # ── Shareholding — Promoter Pledge ───────────────────────────────────────
+    # ── Shareholding — Promoter/DII holding QoQ + Pledge ─────────────────────
     shp_tables = tree.xpath('//section[@id="shareholding"]//table')
     if shp_tables:
         shp = _table_to_dict(shp_tables[0])
@@ -535,6 +615,33 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             pledge_vals = [_f(v) for v in pledge_row if _f(v) is not None]
             if pledge_vals:
                 row["Pledged percentage"] = pledge_vals[0]
+
+        promoter_row = _find_row(shp, "Promoters", "Promoter", "Promoter & PAC")
+        if promoter_row:
+            p_vals = [_f(v) for v in promoter_row if _f(v) is not None]
+            if p_vals:
+                row["Promoter Holding %"] = p_vals[0]
+            if len(p_vals) >= 2:
+                row["Promoter Holding Prev %"] = p_vals[1]
+
+        dii_row = _find_row(shp, "DII", "Domestic Institutions", "Domestic Institutional")
+        if dii_row:
+            d_vals = [_f(v) for v in dii_row if _f(v) is not None]
+            if d_vals:
+                row["DII %"] = d_vals[0]
+
+        # Dividend Yield from key ratios or ratios table
+        for li in tree.xpath(
+            '//section[@id="top-ratios"]//li | //div[contains(@class,"top-ratios")]//li'
+        ):
+            lbl_el = li.xpath('.//span[@class="name"]')
+            val_el = li.xpath('.//span[@class="number"]')
+            if lbl_el and val_el:
+                lbl = lbl_el[0].text_content().strip()
+                if "Dividend Yield" in lbl or "Div Yield" in lbl:
+                    dv = _f(val_el[0].text_content())
+                    if dv is not None:
+                        row["Dividend Yield"] = dv
 
     # ── Bank-specific — GNPA/NIM/CAR (from key metrics section) ──────────────
     for li in tree.xpath('//section[@id="peer-comparison"]//li | //ul[contains(@class,"data-table")]//li'):
@@ -610,15 +717,23 @@ def load_cache(symbol: str, cache_dir: Path) -> Optional[dict]:
     p = cache_path(symbol, cache_dir)
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            payload = json.loads(p.read_text())
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("__cache_schema_version") != CACHE_SCHEMA_VERSION:
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, dict) else None
         except Exception:
-            pass
+            return None
     return None
 
 
 def save_cache(symbol: str, data: dict, cache_dir: Path) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path(symbol, cache_dir).write_text(json.dumps(data, default=str))
+    cache_path(symbol, cache_dir).write_text(
+        json.dumps({"__cache_schema_version": CACHE_SCHEMA_VERSION, "data": data}, default=str)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -673,20 +788,29 @@ def run(
             if i < total:
                 time.sleep(delay + random.uniform(0, delay * 0.3))
 
-    # ── Multi-threaded mode (lower delay, but easier to get blocked) ──────────
+    # ── Multi-threaded mode ───────────────────────────────────────────────────
     else:
-        session_pool = [make_session() for _ in range(workers)]
+        _local = threading.local()
 
         def fetch_worker(args):
             idx, symbol = args
+            # First call per thread: create a dedicated session and stagger startup
+            # so workers don't all fire at t=0 (slot 0 starts immediately,
+            # slot 1 waits delay/workers, slot 2 waits 2*delay/workers, etc.)
+            if not hasattr(_local, "session"):
+                slot = idx % workers
+                _local.session = make_session()
+                if slot > 0:
+                    time.sleep(slot * delay / workers)
+
             if not force_refresh:
                 cached = load_cache(symbol, cache_dir)
                 if cached:
                     return idx, symbol, cached, True
-            sess = session_pool[idx % workers]
-            data = scrape_stock(symbol, sess)
+
+            data = scrape_stock(symbol, _local.session)
             save_cache(symbol, data, cache_dir)
-            time.sleep(delay + random.uniform(0, delay * 0.5))
+            time.sleep(delay + random.uniform(0, delay * 0.3))
             return idx, symbol, data, False
 
         with ThreadPoolExecutor(max_workers=workers) as executor:

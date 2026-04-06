@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Optional
 from .config import (
     OPPORTUNITY_WEIGHTS,
+    BEAR_OPPORTUNITY_WEIGHTS,
     RED_FLAG_CAPS,
     INVESTABILITY,
     MIN_RANKABLE_CARDS,
@@ -26,12 +27,13 @@ def _rf_band(rf_score: float):
             return cap, status
     return None, "Avoid"
 
-def compute_opportunity_score(rating: StockRating) -> StockRating:
+def compute_opportunity_score(rating: StockRating, market_mode: str = "auto") -> StockRating:
     """
-    1. Compute raw Opportunity Score from 5 cards (no Red Flags).
+    1. Compute raw Opportunity Score from 6 cards (no Red Flags).
     2. Apply Red Flag cap.
     3. Set Investability Status.
     4. Populate Top 3 Strengths & Weaknesses.
+    Bear mode uses BEAR_OPPORTUNITY_WEIGHTS, which heavily weights contrarian signals.
     """
     cards = {
         "performance":   rating.performance,
@@ -39,7 +41,9 @@ def compute_opportunity_score(rating: StockRating) -> StockRating:
         "growth":        rating.growth,
         "profitability": rating.profitability,
         "entry_point":   rating.entry_point,
+        "contrarian":    rating.contrarian,
     }
+    opp_weights = BEAR_OPPORTUNITY_WEIGHTS if market_mode == "bear" else OPPORTUNITY_WEIGHTS
 
     # Check eligibility: at least MIN_RANKABLE_CARDS of 6 cards must be rankable
     all_six = list(cards.values()) + [rating.red_flags]
@@ -54,7 +58,7 @@ def compute_opportunity_score(rating: StockRating) -> StockRating:
     weighted_sum = 0.0
     for card_name, card in cards.items():
         if card.is_rankable and card.score is not None:
-            w = OPPORTUNITY_WEIGHTS[card_name]
+            w = opp_weights[card_name]
             weighted_sum += card.score * w
             total_w += w
 

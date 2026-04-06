@@ -52,6 +52,7 @@ class StockRating:
     profitability: CardResult = field(default_factory=lambda: CardResult("profitability", None, None))
     entry_point:   CardResult = field(default_factory=lambda: CardResult("entry_point", None, None))
     red_flags:     CardResult = field(default_factory=lambda: CardResult("red_flags", None, None))
+    contrarian:    CardResult = field(default_factory=lambda: CardResult("contrarian", None, None))
 
     # Final composite
     opportunity_score:    Optional[float] = None

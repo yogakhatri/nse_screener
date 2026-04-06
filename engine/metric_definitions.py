@@ -280,12 +280,13 @@ def compute_cagr_3y(value_fy0: Optional[float],
     LOOKBACK  : 3 full fiscal years
     FORMULA   : (value_fy0 / value_fy3)^(1/3) - 1   [decimal, e.g. 0.17 = 17%]
     FALLBACK  : None if either input is None
+                None if value_fy0 <= 0 (negative/zero latest value makes CAGR non-meaningful here)
                 None if value_fy3 <= 0 (base cannot be zero or negative for CAGR)
                 For eps_cagr_3y: None if eps_fy3 <= 0 (negative base → meaningless CAGR)
                 For rev_cagr_3y: None if rev_fy3 <= 0
     DIRECTION : higher_is_better = True
     """
-    if value_fy0 is None or value_fy3 is None or value_fy3 <= 0:
+    if value_fy0 is None or value_fy3 is None or value_fy0 <= 0 or value_fy3 <= 0:
         return None
     return (value_fy0 / value_fy3) ** (1.0 / 3.0) - 1.0
 
@@ -1074,3 +1075,171 @@ def check_all_disqualifiers(
             triggered.append(f"Governance disqualifier: {disq_events}")
     return len(triggered) > 0, triggered
 
+
+# ══════════════════════════════════════════════════════════════════════
+# SECTION 9 — DEEP VALUE & CONTRARIAN INDICATORS
+# ══════════════════════════════════════════════════════════════════════
+#
+# These metrics power the Contrarian card, which is heavily weighted in
+# Bear / Neutral market modes to surface fundamentally sound companies
+# that are currently mispriced due to broad market weakness.
+#
+
+def compute_piotroski_f_score(
+    roa_fy0: Optional[float],
+    cfo: Optional[float],
+    roa_fy1: Optional[float] = None,
+    cfo_pat_ratio: Optional[float] = None,
+    debt_to_equity_fy0: Optional[float] = None,
+    debt_to_equity_fy1: Optional[float] = None,
+    current_ratio_fy0: Optional[float] = None,
+    current_ratio_fy1: Optional[float] = None,
+    shares_diluted: Optional[bool] = None,
+    gross_margin_fy0: Optional[float] = None,
+    gross_margin_fy1: Optional[float] = None,
+    asset_turnover_fy0: Optional[float] = None,
+    asset_turnover_fy1: Optional[float] = None,
+) -> Optional[float]:
+    """
+    METRIC    : piotroski_f_score — Adapted Piotroski F-Score (0-100 normalised)
+    FORMULA   : 9 binary signals: profitability (F1-F4), leverage/liquidity (F5-F7),
+                efficiency (F8-F9). score = (passed / available) × 100.
+    RETURNS   : None if fewer than 4 signals can be evaluated.
+    DIRECTION : higher_is_better = True
+    """
+    available = 0
+    passed = 0
+
+    def _chk(condition: bool) -> None:
+        nonlocal available, passed
+        available += 1
+        if condition:
+            passed += 1
+
+    if roa_fy0 is not None:                                                    # F1
+        _chk(roa_fy0 > 0)
+    if cfo is not None:                                                        # F2
+        _chk(cfo > 0)
+    if roa_fy0 is not None and roa_fy1 is not None:                            # F3
+        _chk(roa_fy0 > roa_fy1)
+    if cfo_pat_ratio is not None:                                              # F4
+        _chk(cfo_pat_ratio >= 1.0)
+    if debt_to_equity_fy0 is not None and debt_to_equity_fy1 is not None:     # F5
+        _chk(debt_to_equity_fy0 < debt_to_equity_fy1)
+    if current_ratio_fy0 is not None and current_ratio_fy1 is not None:       # F6
+        _chk(current_ratio_fy0 > current_ratio_fy1)
+    if shares_diluted is not None:                                             # F7
+        _chk(not shares_diluted)
+    if gross_margin_fy0 is not None and gross_margin_fy1 is not None:         # F8
+        _chk(gross_margin_fy0 > gross_margin_fy1)
+    if asset_turnover_fy0 is not None and asset_turnover_fy1 is not None:     # F9
+        _chk(asset_turnover_fy0 > asset_turnover_fy1)
+
+    if available < 4:
+        return None
+    return round((passed / available) * 100.0, 2)
+
+
+def compute_earnings_yield(
+    pe_ratio: Optional[float],
+    gsec_yield_pct: float = 7.0,
+) -> Optional[float]:
+    """
+    METRIC    : earnings_yield — Equity earnings yield premium over India 10Y G-Sec
+    FORMULA   : earnings_yield_pct = (1 / PE) × 100
+                equity_premium     = earnings_yield_pct - gsec_yield_pct
+                score              = 50 + equity_premium × 5  [clamped 0–100]
+    INTERPRETATION: Score > 50 → equity beats G-Sec; score = 100 at premium = +10%.
+    FALLBACK  : None if pe_ratio ≤ 0 or missing.
+    DIRECTION : higher_is_better = True
+    """
+    if pe_ratio is None or pe_ratio <= 0:
+        return None
+    equity_premium = (1.0 / pe_ratio) * 100.0 - gsec_yield_pct
+    return round(float(np.clip(50.0 + equity_premium * 5.0, 0.0, 100.0)), 2)
+
+
+def compute_dividend_yield_score(
+    dividend_yield_pct: Optional[float],
+    hist_median_yield_pct: Optional[float] = None,
+) -> Optional[float]:
+    """
+    METRIC    : dividend_yield_score — Dividend yield vs historical median (income floor signal)
+    FORMULA   : With hist_median: score = 50 + (current - median) × 10  [0–100]
+                Without:          score = min(dividend_yield_pct × 10, 100)
+    FALLBACK  : None if dividend_yield_pct missing.
+    DIRECTION : higher_is_better = True
+    """
+    if dividend_yield_pct is None:
+        return None
+    if hist_median_yield_pct is not None and hist_median_yield_pct > 0:
+        delta = dividend_yield_pct - hist_median_yield_pct
+        return round(float(np.clip(50.0 + delta * 10.0, 0.0, 100.0)), 2)
+    return round(float(np.clip(dividend_yield_pct * 10.0, 0.0, 100.0)), 2)
+
+
+def compute_promoter_buying(
+    promoter_holding_pct: Optional[float],
+    promoter_holding_prev_pct: Optional[float],
+) -> Optional[float]:
+    """
+    METRIC    : promoter_buying — Promoter shareholding QoQ change (insider conviction signal)
+    FORMULA   : delta = promoter_holding_pct - promoter_holding_prev_pct
+                score = 50 + delta × 10  [clamped 0–100]
+    INTERPRETATION: > 50 = promoter bought open-market. +2% delta → score 70.
+    FALLBACK  : None if either holding % is missing.
+    DIRECTION : higher_is_better = True
+    """
+    if promoter_holding_pct is None or promoter_holding_prev_pct is None:
+        return None
+    delta = promoter_holding_pct - promoter_holding_prev_pct
+    return round(float(np.clip(50.0 + delta * 10.0, 0.0, 100.0)), 2)
+
+
+def compute_operating_leverage_score(
+    gross_block_fy0: Optional[float],
+    gross_block_fy3: Optional[float],
+    asset_turnover: Optional[float],
+) -> Optional[float]:
+    """
+    METRIC    : operating_leverage_score — Capex cycle readiness (manufacturing / infra)
+    FORMULA   : gb_growth = (gross_block_fy0 / gross_block_fy3) - 1  [3-year capex growth]
+                score = gb_growth × (1 / max(asset_turnover, 0.1)) × 500  [clamped 0–100]
+                If gb_growth ≤ 0 → score = 20 (no recent capex cycle).
+    INTERPRETATION: High score = heavy capacity investment made, utilisation still low
+                    → poised for operating leverage as demand returns.
+    FALLBACK  : None if any input is missing.
+    DIRECTION : higher_is_better = True
+    """
+    if gross_block_fy0 is None or gross_block_fy3 is None or gross_block_fy3 <= 0:
+        return None
+    if asset_turnover is None:
+        return None
+    gb_growth = (gross_block_fy0 / gross_block_fy3) - 1.0
+    if gb_growth <= 0:
+        return 20.0
+    raw = gb_growth * (1.0 / max(float(asset_turnover), 0.1)) * 500.0
+    return round(float(np.clip(raw, 0.0, 100.0)), 2)
+
+
+def compute_margin_expansion(
+    opm_fy0: Optional[float],
+    opm_fy1: Optional[float],
+    opm_fy2: Optional[float] = None,
+    rev_growth_yoy: Optional[float] = None,
+) -> Optional[float]:
+    """
+    METRIC    : margin_expansion — Operating margin expanding (pricing power / cost tailwind)
+    FORMULA   : trend = (opm_fy0 - opm_fy2) / 2  if 3 years present
+                        else opm_fy0 - opm_fy1
+                Bonus × 1.3 if rev_growth_yoy < 5% (margins rising despite flat revenue)
+                score = 50 + trend × 3  [clamped 0–100]
+    FALLBACK  : None if opm_fy0 or opm_fy1 missing.
+    DIRECTION : higher_is_better = True
+    """
+    if opm_fy0 is None or opm_fy1 is None:
+        return None
+    trend = (opm_fy0 - opm_fy2) / 2.0 if opm_fy2 is not None else opm_fy0 - opm_fy1
+    if rev_growth_yoy is not None and rev_growth_yoy < 5.0 and trend > 0:
+        trend *= 1.3
+    return round(float(np.clip(50.0 + trend * 3.0, 0.0, 100.0)), 2)

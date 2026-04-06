@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.fetch_nse_universe import (
     DEFAULT_ARCHIVE_URL_TEMPLATE,

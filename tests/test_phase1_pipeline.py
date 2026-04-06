@@ -84,6 +84,43 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertEqual(merged.iloc[0]["Current Price"], "1200")
             self.assertIn("fund__Name_fund", merged.columns)
 
+    def test_loader_falls_back_to_fund_prefixed_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "self_merged.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "INFY",
+                        "Name": "Infosys",
+                        "Macro Sector": "",
+                        "Sector": "",
+                        "Industry": "",
+                        "Basic Industry": "",
+                        "P/E": "",
+                        "Current Price": "",
+                        "Margin Trend": "",
+                        "FCF Consistency": "",
+                        "Growth Stability": "",
+                        "fund__Sector": "Information Technology",
+                        "fund__Industry": "Computers - Software & Consulting",
+                        "fund__Basic Industry": "IT - Software",
+                        "fund__P/E": "22.5",
+                        "fund__Current Price": "1500",
+                        "fund__Margin Trend": "1.25",
+                        "fund__FCF Consistency": "80.0",
+                        "fund__Growth Stability": "72.0",
+                    }
+                ]
+            ).to_csv(path, index=False)
+            universe = load_from_screener(str(path))
+            stock = universe["INFY"]
+            self.assertEqual(stock.classification.sector, "Information Technology")
+            self.assertEqual(stock.classification.basic_industry, "IT - Software")
+            self.assertEqual(stock.fundamentals["pe_percentile"], 22.5)
+            self.assertEqual(stock.fundamentals["margin_trend"], 1.25)
+            self.assertEqual(stock.fundamentals["fcf_consistency"], 80.0)
+            self.assertEqual(stock.fundamentals["growth_stability"], 72.0)
+
     def test_score_metric_returns_neutral_when_no_peers(self) -> None:
         self.assertEqual(score_metric(10.0, [], True), 50.0)
 
@@ -163,7 +200,8 @@ class Phase1PipelineTests(unittest.TestCase):
     def test_template_quality_report_flags_unsupported_template(self) -> None:
         general_fundamentals = {
             metric: 10.0
-            for card in ["performance", "valuation", "growth", "profitability", "entry_point", "red_flags"]
+            for card in ["performance", "valuation", "growth", "profitability",
+                         "entry_point", "red_flags", "contrarian"]
             for metric in CARD_WEIGHTS["A"][card]
         }
         general = _stock("AAA", fundamentals=general_fundamentals)

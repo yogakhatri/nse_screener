@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent
@@ -111,6 +112,7 @@ def stock_to_row(stock: dict) -> dict:
         "Growth": cards.get("growth", {}).get("score"),
         "Profitability": cards.get("profitability", {}).get("score"),
         "Entry Point": cards.get("entry_point", {}).get("score"),
+        "Contrarian": cards.get("contrarian", {}).get("score"),
         "Red Flags": cards.get("red_flags", {}).get("score"),
         "Upside %": stock.get("expected_upside_pct"),
         "Risk/Reward": stock.get("risk_reward_ratio"),
@@ -138,6 +140,28 @@ def render_score_badge(score, label=None):
     text_color = "#006100" if score >= 70 else "#9c6500" if score >= 50 else "#9c0006"
     lbl = f" ({label})" if label else ""
     return f'<span style="background:{color};color:{text_color};padding:2px 8px;border-radius:4px;font-weight:bold">{score:.1f}{lbl}</span>'
+
+
+def format_metric_number(value, suffix: str = "", decimals: int = 1) -> str:
+    """Render nullable numeric values safely for Streamlit metrics."""
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):.{decimals}f}{suffix}"
+
+
+NUMERIC_COLUMNS = [
+    "Score",
+    "Selection",
+    "Performance",
+    "Valuation",
+    "Growth",
+    "Profitability",
+    "Entry Point",
+    "Contrarian",
+    "Red Flags",
+    "Upside %",
+    "Risk/Reward",
+]
 
 
 # ── Main App ───────────────────────────────────────────────────────────────
@@ -190,6 +214,9 @@ def main():
     # Convert to DataFrame
     rows = [stock_to_row(s) for s in stocks]
     df = pd.DataFrame(rows)
+    for col in NUMERIC_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Apply filters
     if min_score > 0:
@@ -207,12 +234,13 @@ def main():
         st.metric("Filtered", len(df))
         gate_passed = df["Gate Passed"].sum()
         st.metric("Gate Passed", int(gate_passed))
-        buy_count = len(df[df["Recommendation"] == "Buy"])
+        buy_count = len(df[df["Recommendation"] == "Buy Candidate"])
         st.metric("Buy Candidates", buy_count)
 
     # Tabs
-    tab_overview, tab_leaderboard, tab_stock, tab_sector, tab_quality = st.tabs(
-        ["📋 Overview", "🏆 Leaderboard", "🔎 Stock Detail", "📊 Sector View", "⚙️ Run Quality"]
+    tab_overview, tab_leaderboard, tab_stock, tab_sector, tab_hunter, tab_quality = st.tabs(
+        ["📋 Overview", "🏆 Leaderboard", "🔎 Stock Detail", "📊 Sector View",
+         "🎯 Value Hunter", "⚙️ Run Quality"]
     )
 
     # ── Tab 1: Overview ──────────────────────────────────────────────
@@ -236,14 +264,13 @@ def main():
         st.subheader("Score Distribution")
         score_col = df["Score"].dropna()
         if not score_col.empty:
-            import plotly.express as px
             fig = px.histogram(
                 score_col, nbins=20,
                 labels={"value": "Opportunity Score", "count": "Stocks"},
                 title="Opportunity Score Distribution",
             )
             fig.update_layout(showlegend=False, height=300)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         # Recommendation breakdown
         st.subheader("Recommendations")
@@ -257,7 +284,7 @@ def main():
                     color_discrete_sequence=px.colors.qualitative.Set2,
                 )
                 fig.update_layout(height=300)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             with col2:
                 st.dataframe(
                     rec_counts.reset_index().rename(
@@ -291,7 +318,7 @@ def main():
                 subset=["Score", "Performance", "Valuation", "Growth",
                         "Profitability", "Entry Point", "Red Flags"],
             ),
-            use_container_width=True,
+            width="stretch",
             height=600,
         )
 
@@ -329,17 +356,21 @@ def main():
                 # Key metrics row
                 col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
-                    st.metric("Opportunity Score", f"{stock_data.get('final_opportunity_score', 0):.1f}")
+                    st.metric("Opportunity Score", format_metric_number(stock_data.get("final_opportunity_score")))
                 with col2:
                     st.metric("Recommendation", stock_data.get("recommendation", "—"))
                 with col3:
                     st.metric("Entry Signal", stock_data.get("entry_signal", "—"))
                 with col4:
-                    upside = stock_data.get("expected_upside_pct")
-                    st.metric("Expected Upside", f"{upside:.1f}%" if upside else "—")
+                    st.metric(
+                        "Expected Upside",
+                        format_metric_number(stock_data.get("expected_upside_pct"), suffix="%"),
+                    )
                 with col5:
-                    rr = stock_data.get("risk_reward_ratio")
-                    st.metric("Risk/Reward", f"{rr:.2f}" if rr else "—")
+                    st.metric(
+                        "Risk/Reward",
+                        format_metric_number(stock_data.get("risk_reward_ratio"), decimals=2),
+                    )
 
                 # Thesis
                 thesis = stock_data.get("thesis")
@@ -379,7 +410,7 @@ def main():
                                     score_color, subset=["Score"]
                                 ),
                                 hide_index=True,
-                                use_container_width=True,
+                                width="stretch",
                             )
                             if card.get("reason"):
                                 st.caption(card["reason"])
@@ -404,7 +435,7 @@ def main():
 
         sector_df = data.get("sector_summary")
         if sector_df is not None and not sector_df.empty:
-            st.dataframe(sector_df, use_container_width=True, height=400)
+            st.dataframe(sector_df, width="stretch", height=400)
         else:
             # Build sector summary from stocks
             sector_stats = df.groupby("Sector").agg(
@@ -415,13 +446,12 @@ def main():
                 Gate_Passed=("Gate Passed", "sum"),
             ).sort_values("Avg_Score", ascending=False)
 
-            st.dataframe(sector_stats, use_container_width=True, height=400)
+            st.dataframe(sector_stats, width="stretch", height=400)
 
         # Sector score comparison
         st.subheader("Sector Score Comparison")
         sector_avg = df.groupby("Sector")["Score"].mean().dropna().sort_values(ascending=True)
         if not sector_avg.empty:
-            import plotly.express as px
             fig = px.bar(
                 x=sector_avg.values, y=sector_avg.index,
                 orientation="h",
@@ -429,9 +459,118 @@ def main():
                 title="Average Opportunity Score by Sector",
             )
             fig.update_layout(height=max(300, len(sector_avg) * 25))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
-    # ── Tab 5: Run Quality ───────────────────────────────────────────
+    # ── Tab 5: Value Hunter ──────────────────────────────────────
+    with tab_hunter:
+        st.header("🎯 Value Hunter — Deep Value & Bear Market Picks")
+        st.markdown(
+            "Surfaces fundamentally sound stocks that are temporarily mispriced due to broad "
+            "market weakness. Ranked by **Contrarian Score** (Piotroski quality · Earnings "
+            "Yield vs G-Sec · Promoter Buying · Dividend Yield · Operating Leverage)."
+        )
+
+        # ── Filters ──────────────────────────────────────────────────────────
+        vh_col1, vh_col2, vh_col3 = st.columns(3)
+        with vh_col1:
+            min_red_flags = st.slider(
+                "Min Red Flags Score (survival gate)", 0, 100, 45,
+                help="Stocks below this threshold are excluded — too risky in a downturn.",
+            )
+        with vh_col2:
+            min_profitability = st.slider(
+                "Min Profitability Score", 0, 100, 40,
+                help="Ensures the business is fundamentally profitable.",
+            )
+        with vh_col3:
+            min_contrarian = st.slider(
+                "Min Contrarian Score", 0, 100, 30,
+                help="Piotroski quality + earnings yield + promoter buying.",
+            )
+
+        # ── Build value hunter dataframe ───────────────────────────────────
+        vh_df = df.copy()
+        vh_df = vh_df[vh_df["Red Flags"].fillna(0) >= min_red_flags]
+        vh_df = vh_df[vh_df["Profitability"].fillna(0) >= min_profitability]
+        vh_df = vh_df[vh_df["Contrarian"].fillna(0) >= min_contrarian]
+
+        # Composite value hunter rank: 50% contrarian + 25% valuation + 25% profitability
+        vh_df = vh_df.copy()
+        vh_df["VH Score"] = (
+            vh_df["Contrarian"].fillna(0) * 0.50
+            + vh_df["Valuation"].fillna(0) * 0.25
+            + vh_df["Profitability"].fillna(0) * 0.25
+        ).round(1)
+        vh_df = vh_df.sort_values("VH Score", ascending=False)
+
+        st.markdown(f"**{len(vh_df)} stocks** pass all filters.")
+
+        if not vh_df.empty:
+            # ── Scatter: Contrarian vs Valuation (size = Profitability) ────
+            scatter_df = vh_df.dropna(subset=["Contrarian", "Valuation"])
+            if not scatter_df.empty:
+                fig_scatter = px.scatter(
+                    scatter_df,
+                    x="Valuation",
+                    y="Contrarian",
+                    size=scatter_df["Profitability"].fillna(20).clip(lower=5),
+                    color="Red Flags",
+                    color_continuous_scale="RdYlGn",
+                    range_color=[30, 100],
+                    hover_name="Ticker",
+                    hover_data={"Name": True, "Sector": True, "VH Score": True,
+                                "Contrarian": True, "Valuation": True,
+                                "Profitability": True, "Red Flags": True},
+                    title="Deep Value Map — Contrarian Score vs Valuation Score",
+                    labels={"Valuation": "Valuation Score", "Contrarian": "Contrarian Score"},
+                )
+                fig_scatter.add_hline(y=60, line_dash="dot", line_color="green",
+                                      annotation_text="High Contrarian")
+                fig_scatter.add_vline(x=60, line_dash="dot", line_color="blue",
+                                      annotation_text="Attractive Valuation")
+                fig_scatter.update_layout(height=450)
+                st.plotly_chart(fig_scatter, width="stretch")
+
+            # ── Fallen Angels table ─────────────────────────────────────────
+            st.subheader("🏹 Fallen Angels — Top Deep Value Candidates")
+            fa_cols = ["Ticker", "Name", "Sector", "VH Score",
+                       "Contrarian", "Valuation", "Profitability",
+                       "Red Flags", "Performance", "Recommendation", "Upside %"]
+            fa_show = [c for c in fa_cols if c in vh_df.columns]
+            st.dataframe(
+                vh_df[fa_show].head(30).style.map(
+                    score_color,
+                    subset=[c for c in ["VH Score", "Contrarian", "Valuation",
+                                        "Profitability", "Red Flags"] if c in fa_show],
+                ),
+                width="stretch",
+                height=550,
+            )
+
+            # ── Sector distribution ─────────────────────────────────────────
+            st.subheader("Sector Distribution of Value Picks")
+            sec_counts = vh_df["Sector"].value_counts().head(15)
+            if not sec_counts.empty:
+                fig_sec = px.bar(
+                    x=sec_counts.values, y=sec_counts.index,
+                    orientation="h",
+                    labels={"x": "Number of Stocks", "y": "Sector"},
+                    title="Sectors with Most Deep Value Stocks",
+                )
+                fig_sec.update_layout(height=max(250, len(sec_counts) * 28))
+                st.plotly_chart(fig_sec, width="stretch")
+
+            # ── Download ────────────────────────────────────────────────────
+            st.download_button(
+                "📥 Download Value Hunter List",
+                vh_df.to_csv(index=False),
+                "value_hunter.csv",
+                "text/csv",
+            )
+        else:
+            st.info("No stocks match the current filters. Try lowering the threshold sliders.")
+
+    # ── Tab 6: Run Quality ──────────────────────────────────────
     with tab_quality:
         st.header("⚙️ Run Quality & Diagnostics")
 
@@ -464,7 +603,7 @@ def main():
                 Rankable_Pct=("Rankable", lambda x: f"{x.mean()*100:.1f}%"),
                 Total=("Rankable", "count"),
             )
-            st.dataframe(cov_summary, use_container_width=True)
+            st.dataframe(cov_summary, width="stretch")
 
         # Input quality
         iq_path = Path(run_dir) / "input_quality.json"
