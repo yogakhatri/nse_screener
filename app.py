@@ -105,7 +105,7 @@ def stock_to_row(stock: dict) -> dict:
         "Industry": stock.get("classification", {}).get("basic_industry", ""),
         "Score": stock.get("final_opportunity_score"),
         "Selection": stock.get("selection_score"),
-        "Recommendation": stock.get("recommendation", ""),
+        "Recommendation": normalize_recommendation(stock.get("recommendation", "")),
         "Entry Signal": stock.get("entry_signal", ""),
         "Performance": cards.get("performance", {}).get("score"),
         "Valuation": cards.get("valuation", {}).get("score"),
@@ -163,6 +163,41 @@ NUMERIC_COLUMNS = [
     "Risk/Reward",
 ]
 
+RECOMMENDATION_ALIASES = {
+    "buy": "Buy Candidate",
+    "buy candidate": "Buy Candidate",
+    "hold": "Watchlist",
+    "watch": "Watchlist",
+    "watchlist": "Watchlist",
+    "avoid": "Avoid",
+    "unsupported": "Unsupported",
+    "unsupported data": "Unsupported",
+}
+
+RECOMMENDATION_ORDER = ["Buy Candidate", "Watchlist", "Avoid", "Unsupported"]
+
+
+def normalize_recommendation(value) -> str:
+    """Map legacy and engine recommendation labels to dashboard labels."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    return RECOMMENDATION_ALIASES.get(text.lower(), text)
+
+
+def get_recommendation_options(stocks: list[dict]) -> list[str]:
+    """Return recommendation filter options in a stable user-friendly order."""
+    available = {
+        normalize_recommendation(stock.get("recommendation"))
+        for stock in stocks
+    }
+    available.discard("")
+    ordered = [label for label in RECOMMENDATION_ORDER if label in available]
+    extras = sorted(available - set(RECOMMENDATION_ORDER))
+    return ordered + extras
+
 
 # ── Main App ───────────────────────────────────────────────────────────────
 def main():
@@ -190,6 +225,9 @@ def main():
 
         selected_run = st.selectbox("Select Run Date", available_runs, index=0)
         run_dir = str(PROJECT_ROOT / "runs" / selected_run)
+        data = load_run_data(run_dir)
+        stocks = data["stocks"]
+        recommendation_options = get_recommendation_options(stocks)
 
         st.divider()
 
@@ -199,13 +237,9 @@ def main():
         gate_filter = st.checkbox("Only Gate-Passed Stocks", value=False)
         rec_filter = st.multiselect(
             "Recommendation",
-            ["Buy", "Hold", "Avoid", "Unsupported", "Watch"],
+            recommendation_options,
             default=[],
         )
-
-    # Load data
-    data = load_run_data(run_dir)
-    stocks = data["stocks"]
 
     if not stocks:
         st.warning(f"No stock data found in {run_dir}")
@@ -312,15 +346,18 @@ def main():
                      "Entry Point", "Red Flags", "Upside %"]
         display_df_show = display_df[show_cols].head(100)
 
-        st.dataframe(
-            display_df_show.style.map(
-                score_color,
-                subset=["Score", "Performance", "Valuation", "Growth",
-                        "Profitability", "Entry Point", "Red Flags"],
-            ),
-            width="stretch",
-            height=600,
-        )
+        if display_df_show.empty:
+            st.info("No stocks match the current filters.")
+        else:
+            st.dataframe(
+                display_df_show.style.map(
+                    score_color,
+                    subset=["Score", "Performance", "Valuation", "Growth",
+                            "Profitability", "Entry Point", "Red Flags"],
+                ),
+                width="stretch",
+                height=600,
+            )
 
         # Download button
         csv_data = display_df.to_csv(index=False)
@@ -332,7 +369,11 @@ def main():
 
         # Stock selector
         tickers = sorted(df["Ticker"].unique())
-        selected_ticker = st.selectbox("Select Stock", tickers, index=0 if tickers else None)
+        if not tickers:
+            st.info("No stocks match the current filters. Clear or widen the filters to inspect a stock.")
+            selected_ticker = None
+        else:
+            selected_ticker = st.selectbox("Select Stock", tickers, index=0)
 
         if selected_ticker:
             # Find stock data
@@ -358,7 +399,10 @@ def main():
                 with col1:
                     st.metric("Opportunity Score", format_metric_number(stock_data.get("final_opportunity_score")))
                 with col2:
-                    st.metric("Recommendation", stock_data.get("recommendation", "—"))
+                    st.metric(
+                        "Recommendation",
+                        normalize_recommendation(stock_data.get("recommendation", "—")) or "—",
+                    )
                 with col3:
                     st.metric("Entry Signal", stock_data.get("entry_signal", "—"))
                 with col4:
@@ -442,7 +486,7 @@ def main():
                 Count=("Ticker", "count"),
                 Avg_Score=("Score", "mean"),
                 Top_Score=("Score", "max"),
-                Buy_Count=("Recommendation", lambda x: (x == "Buy").sum()),
+                Buy_Count=("Recommendation", lambda x: (x == "Buy Candidate").sum()),
                 Gate_Passed=("Gate Passed", "sum"),
             ).sort_values("Avg_Score", ascending=False)
 

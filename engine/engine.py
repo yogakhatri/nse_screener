@@ -5,7 +5,7 @@ Wires together: template routing → peer resolution → card scoring → aggreg
 from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List, Optional
-from .config import infer_template_code_from_basic_industry, validate_runtime_config
+from .config import infer_template_code, validate_runtime_config
 from .models import (RawStockData, StockRating, Template, NSEClassification, PeerLevel)
 from .peer_group import resolve_peer_group
 from .cards import (score_performance, score_valuation, score_growth,
@@ -15,8 +15,15 @@ from .aggregator import compute_opportunity_score
 from .advanced import infer_market_mode, apply_advanced_overlays
 from .output import to_dict, to_json
 
-def _assign_template(basic_industry: str) -> Template:
-    return Template(infer_template_code_from_basic_industry(basic_industry))
+def _assign_template(classification: NSEClassification) -> Template:
+    return Template(
+        infer_template_code(
+            macro_sector=classification.macro_sector,
+            sector=classification.sector,
+            industry=classification.industry,
+            basic_industry=classification.basic_industry,
+        )
+    )
 
 class NSERatingEngine:
     """
@@ -40,7 +47,7 @@ class NSERatingEngine:
 
     def rate(self, ticker: str) -> StockRating:
         stock = self.stocks[ticker]
-        template = _assign_template(stock.classification.basic_industry)
+        template = _assign_template(stock.classification)
         peer_tickers, peer_level = resolve_peer_group(ticker, self._cls_map)
         peers = [self.stocks[t] for t in peer_tickers if t in self.stocks]
 

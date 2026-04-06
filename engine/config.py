@@ -119,6 +119,23 @@ TEMPLATE_NBFC: FrozenSet[str] = frozenset([
     "Asset Finance Company",
 ])
 
+TEMPLATE_BANK_INDUSTRIES: FrozenSet[str] = frozenset([
+    "Banking",
+    "Private Sector Bank",
+    "Public Sector Bank",
+    "Other Bank",
+    "Foreign Bank",
+])
+
+TEMPLATE_NBFC_INDUSTRIES: FrozenSet[str] = frozenset([
+    "Non Banking Financial Company (NBFC)",
+    "Housing Finance Company",
+    "Microfinance Institutions",
+    "Micro Finance",
+    "Financial Institution",
+    "Asset Finance Company",
+])
+
 # ============================================================================
 # Card Weights by Template
 # ============================================================================
@@ -138,13 +155,12 @@ CARD_WEIGHTS = {
             "forward_view": 0.15,
         },
         "valuation": {
-            "pe_percentile": 0.17,
-            "pb_percentile": 0.10,
-            "p_cfo_percentile": 0.20,
-            "ev_ebitda_percentile": 0.14,
-            "hist_val_band": 0.14,
-            "fcf_yield": 0.13,
-            "iv_gap": 0.12,
+            "pe_percentile": 0.20,
+            "pb_percentile": 0.15,
+            "fcf_yield": 0.20,
+            "iv_gap": 0.20,
+            "roe_adj_pb": 0.15,
+            "dividend_yield_score": 0.10,
         },
         "growth": {
             "rev_cagr_3y": 0.18,
@@ -205,12 +221,12 @@ CARD_WEIGHTS = {
             "fair_value_gap": 0.18,
         },
         "growth": {
-            "advances_growth": 0.23,
-            "deposit_growth": 0.19,
-            "nii_growth": 0.20,
-            "fee_income_growth": 0.11,
-            "earnings_growth": 0.15,
-            "growth_stability": 0.12,
+            "deposit_growth": 0.20,
+            "earnings_growth": 0.18,
+            "rev_cagr_3y": 0.18,
+            "eps_cagr_3y": 0.16,
+            "rev_growth_yoy": 0.14,
+            "growth_stability": 0.14,
         },
         "profitability": {
             "roa": 0.20,
@@ -230,12 +246,12 @@ CARD_WEIGHTS = {
             "drawdown_normalization": 0.10,
         },
         "red_flags": {
-            "gnpa_nnpa_stress": 0.20,
+            "default_distress": 0.22,
+            "asm_gsm_risk": 0.18,
             "pcr_weakness": 0.16,
-            "capital_adequacy_stress": 0.16,
-            "slippages_stress": 0.15,
-            "governance_promoter": 0.10,
-            "surveillance_default": 0.23,
+            "governance_promoter": 0.12,
+            "liquidity_manipulation": 0.16,
+            "surveillance_default": 0.16,
         },
         "contrarian": {
             "piotroski_f_score": 0.30,
@@ -261,12 +277,12 @@ CARD_WEIGHTS = {
             "fair_value_gap": 0.18,
         },
         "growth": {
-            "aum_growth": 0.23,
-            "advances_growth": 0.19,
-            "nii_growth": 0.20,
-            "fee_income_growth": 0.11,
-            "earnings_growth": 0.15,
-            "growth_stability": 0.12,
+            "aum_growth": 0.20,
+            "earnings_growth": 0.18,
+            "rev_cagr_3y": 0.18,
+            "eps_cagr_3y": 0.16,
+            "rev_growth_yoy": 0.14,
+            "growth_stability": 0.14,
         },
         "profitability": {
             "roa": 0.20,
@@ -286,12 +302,12 @@ CARD_WEIGHTS = {
             "drawdown_normalization": 0.10,
         },
         "red_flags": {
-            "gnpa_nnpa_stress": 0.20,
-            "alm_mismatch": 0.16,
-            "capital_adequacy_stress": 0.16,
-            "slippages_stress": 0.15,
-            "governance_promoter": 0.10,
-            "surveillance_default": 0.23,
+            "default_distress": 0.24,
+            "asm_gsm_risk": 0.18,
+            "pcr_weakness": 0.12,
+            "governance_promoter": 0.12,
+            "liquidity_manipulation": 0.18,
+            "surveillance_default": 0.16,
         },
         "contrarian": {
             "piotroski_f_score": 0.30,
@@ -537,12 +553,54 @@ def configured_core_cards() -> tuple[str, ...]:
     return tuple(card for card in OPPORTUNITY_WEIGHTS.keys() if card != "contrarian")
 
 
-def infer_template_code_from_basic_industry(basic_industry: str) -> str:
-    if basic_industry in TEMPLATE_BANKS:
-        return "B"
-    if basic_industry in TEMPLATE_NBFC:
+def _normalize_taxonomy_label(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def infer_template_code(
+    macro_sector: str = "",
+    sector: str = "",
+    industry: str = "",
+    basic_industry: str = "",
+) -> str:
+    basic_norm = _normalize_taxonomy_label(basic_industry)
+    industry_norm = _normalize_taxonomy_label(industry)
+    sector_norm = _normalize_taxonomy_label(sector)
+    macro_norm = _normalize_taxonomy_label(macro_sector)
+
+    nbfc_basics = {_normalize_taxonomy_label(v) for v in TEMPLATE_NBFC} | {"finance"}
+    nbfc_industries = {_normalize_taxonomy_label(v) for v in TEMPLATE_NBFC_INDUSTRIES}
+    nbfc_tokens = (
+        "non banking financial company",
+        "housing finance",
+        "microfinance",
+        "micro finance",
+        "financial institution",
+        "asset finance",
+        "nbfc",
+        "hfc",
+    )
+    if (
+        basic_norm in nbfc_basics and any(token in industry_norm for token in nbfc_tokens)
+    ) or industry_norm in nbfc_industries or any(token in industry_norm for token in nbfc_tokens):
         return "C"
+
+    bank_basics = {_normalize_taxonomy_label(v) for v in TEMPLATE_BANKS} | {"banks"}
+    bank_industries = {_normalize_taxonomy_label(v) for v in TEMPLATE_BANK_INDUSTRIES}
+    if basic_norm in bank_basics or industry_norm in bank_industries or "bank" in industry_norm:
+        return "B"
+
+    if sector_norm == "financial services" and basic_norm == "finance" and industry_norm == "other financial services":
+        return "C"
+
+    if sector_norm == "financial services" and macro_norm == "financial services" and "bank" in basic_norm:
+        return "B"
+
     return "A"
+
+
+def infer_template_code_from_basic_industry(basic_industry: str) -> str:
+    return infer_template_code(basic_industry=basic_industry)
 
 
 def template_display_name(template_code: str) -> str:

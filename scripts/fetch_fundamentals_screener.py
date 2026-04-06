@@ -94,7 +94,7 @@ OUTPUT_COLUMNS = [
     "Margin Trend", "CFO/PAT", "FCF Consistency", "Growth Stability",
 ]
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -228,6 +228,16 @@ def _annual_values(values: list, headers: list[str]) -> list[Optional[float]]:
             continue
         annual.append(_f(value))
     return annual
+
+
+def _latest_yoy_pct(values: list[Optional[float]]) -> Optional[float]:
+    valid = [v for v in values if v is not None]
+    if len(valid) < 2:
+        return None
+    growth = compute_yoy_growth(valid[-1], valid[-2])
+    if growth is None:
+        return None
+    return round(growth * 100.0, 1)
 
 
 def _quarterly_ttm_yoy_pct(values: list) -> Optional[float]:
@@ -376,6 +386,8 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
 
         # Headers for year labels
         pl_headers = [th.text_content().strip() for th in pl_tables[0].xpath('.//thead/tr/th')]
+        valid_sales: list[float] = []
+        valid_pat: list[float] = []
 
         # Sales / Revenue
         sales_row = _find_row(pl, "Sales", "Revenue", "Net Sales", "Total Revenue")
@@ -395,11 +407,29 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
                 if stability is not None:
                     row["Growth Stability"] = round(stability, 1)
 
+        expense_row = _find_row(pl, "Expenses", "Total Expenses", "Operating Expenses")
+        if expense_row and "Cost to Income" not in row:
+            annual_expenses = _annual_values(expense_row, pl_headers)
+            valid_expenses = [v for v in annual_expenses if v is not None]
+            if valid_expenses and valid_sales and valid_sales[-1] > 0:
+                row["Cost to Income"] = round(valid_expenses[-1] / valid_sales[-1] * 100.0, 2)
+
+        financing_margin_row = _find_row(pl, "Financing Margin %", "NIM", "Net Interest Margin")
+        if financing_margin_row and "NIM" not in row:
+            annual_nim = _annual_values(financing_margin_row, pl_headers)
+            valid_nim = [v for v in annual_nim if v is not None]
+            if valid_nim:
+                row["NIM"] = round(valid_nim[-1], 2)
+
         # Net Profit
         pat_row = _find_row(pl, "Net Profit", "PAT", "Profit after tax")
         if pat_row:
             annual_pat = _annual_values(pat_row, pl_headers)
             valid_pat = [v for v in annual_pat if v is not None]
+            if valid_pat:
+                row["_pat_fy0"] = valid_pat[-1]
+            if len(valid_pat) >= 2:
+                row["_pat_fy1"] = valid_pat[-2]
             if len(valid_pat) >= 4:
                 pat_cagr = compute_cagr_3y(valid_pat[-1], valid_pat[-4])
                 if pat_cagr is not None:
@@ -503,13 +533,34 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         # Asset Turnover = Revenue / Total Assets
         ta_row = _find_row(bs, "Total Assets", "Balance Sheet Total")
         if ta_row:
-            ta_vals = [_f(v) for v in ta_row if _f(v) is not None]
+            ta_annual = _annual_values(ta_row, bs_headers)
+            ta_vals = [v for v in ta_annual if v is not None]
             sales_fy0 = _f(row.get("_sales_fy0"))
             sales_fy1 = _f(row.get("_sales_fy1"))
             if ta_vals and sales_fy0 and ta_vals[-1] and ta_vals[-1] > 0:
                 row["Asset Turnover"] = round(sales_fy0 / ta_vals[-1], 2)
             if len(ta_vals) >= 2 and sales_fy1 and ta_vals[-2] and ta_vals[-2] > 0:
                 row["Asset Turnover Prev Year"] = round(sales_fy1 / ta_vals[-2], 2)
+            pat_fy0 = _f(row.get("_pat_fy0"))
+            pat_fy1 = _f(row.get("_pat_fy1"))
+            if pat_fy0 is not None and ta_vals and ta_vals[-1] > 0 and "ROA" not in row:
+                row["ROA"] = round(pat_fy0 / ta_vals[-1] * 100.0, 2)
+            if pat_fy1 is not None and len(ta_vals) >= 2 and ta_vals[-2] > 0 and "ROA Prev Year" not in row:
+                row["ROA Prev Year"] = round(pat_fy1 / ta_vals[-2] * 100.0, 2)
+
+        deposits_row = _find_row(bs, "Deposits", "Total Deposits")
+        if deposits_row and "Deposit Growth" not in row:
+            deposits_annual = _annual_values(deposits_row, bs_headers)
+            deposit_growth = _latest_yoy_pct(deposits_annual)
+            if deposit_growth is not None:
+                row["Deposit Growth"] = deposit_growth
+
+        aum_row = _find_row(bs, "AUM", "Assets Under Management")
+        if aum_row and "AUM Growth" not in row:
+            aum_annual = _annual_values(aum_row, bs_headers)
+            aum_growth = _latest_yoy_pct(aum_annual)
+            if aum_growth is not None:
+                row["AUM Growth"] = aum_growth
 
     # ── Cash Flow ─────────────────────────────────────────────────────────────
     cf_tables = tree.xpath('//section[@id="cash-flow"]//table')
@@ -688,7 +739,17 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             row["Intrinsic Value"] = _f(iv_el[0].text_content())
 
     # Clean internal temp keys
-    for k in ["_book_value", "_div_yield", "_roe", "_face_value", "_market_cap_cr", "_52w_high", "_52w_low"]:
+    for k in [
+        "_book_value",
+        "_div_yield",
+        "_roe",
+        "_face_value",
+        "_market_cap_cr",
+        "_52w_high",
+        "_52w_low",
+        "_pat_fy0",
+        "_pat_fy1",
+    ]:
         row.pop(k, None)
 
     return row

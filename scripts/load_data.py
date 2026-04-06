@@ -1,4 +1,5 @@
 import csv
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -15,7 +16,7 @@ from engine.config import (
     ENABLE_RAW_PRICE_METRICS,
     PRICE_HISTORY_LOOKBACK_SESSIONS,
     RAW_PRICE_METRIC_FALLBACK_TO_CSV,
-    infer_template_code_from_basic_industry,
+    infer_template_code,
     validate_runtime_config,
 )
 from engine.metric_definitions import (
@@ -211,9 +212,18 @@ RAW_PRICE_METRICS = {
     "avg_daily_turnover_cr",
 }
 
+FUND_LIKE_NAME_PATTERN = re.compile(
+    r"\b(etf|etn|bees|index fund|liquid etf|gold etf|silver etf|exchange traded fund)\b",
+    re.IGNORECASE,
+)
+
 
 def _norm(name: str) -> str:
     return "".join(ch.lower() for ch in str(name).strip() if ch.isalnum())
+
+
+def _is_fund_like_security(name: str) -> bool:
+    return bool(FUND_LIKE_NAME_PATTERN.search(str(name or "").strip()))
 
 
 def _first_present(row: pd.Series, aliases: Iterable[str]) -> Optional[object]:
@@ -368,9 +378,10 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
 
     roe_ttm = raw.get("roe_ttm")
     pb_now = fundamentals.get("pb_percentile")
-    if template_hint in {"B", "C"} and pb_now is not None and roe_ttm is not None and roe_ttm > 0:
+    if pb_now is not None and roe_ttm is not None and roe_ttm > 0:
         if fundamentals.get("roe_adj_pb") is None:
             fundamentals["roe_adj_pb"] = pb_now / roe_ttm
+    if template_hint in {"B", "C"} and pb_now is not None and roe_ttm is not None and roe_ttm > 0:
         coe = LOCKED_COE_NBFC if template_hint == "C" else LOCKED_COE_BANK
         fair_pb = compute_fair_pb(roe_ttm, coe=coe)
         fair_gap = compute_fair_value_gap(pb_now, fair_pb)
@@ -480,8 +491,13 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
     return on_asm, on_gsm
 
 
-def _template_hint(basic_industry: str) -> str:
-    return infer_template_code_from_basic_industry(basic_industry)
+def _template_hint(classification: NSEClassification) -> str:
+    return infer_template_code(
+        macro_sector=classification.macro_sector,
+        sector=classification.sector,
+        industry=classification.industry,
+        basic_industry=classification.basic_industry,
+    )
 
 
 def validate_loader_support() -> None:
@@ -531,6 +547,9 @@ def load_from_screener(
         ticker = _get_text(row, TICKER_ALIASES, "").upper()
         if not ticker:
             continue
+        name = _get_text(row, NAME_ALIASES, ticker)
+        if _is_fund_like_security(name):
+            continue
 
         industry = _get_text(row, CLASSIFICATION_ALIASES["industry"], "Diversified")
         basic_industry = _get_text(row, CLASSIFICATION_ALIASES["basic_industry"], "")
@@ -569,12 +588,12 @@ def load_from_screener(
         on_asm, on_gsm = _fill_derived_metrics(
             fundamentals=fundamentals,
             raw=raw,
-            template_hint=_template_hint(classification.basic_industry),
+            template_hint=_template_hint(classification),
         )
 
         universe[ticker] = RawStockData(
             ticker=ticker,
-            name=_get_text(row, NAME_ALIASES, ticker),
+            name=name,
             classification=classification,
             price_history=price_history,
             fundamentals=fundamentals,
@@ -591,7 +610,12 @@ def metric_coverage(universe: dict) -> dict:
     report: dict = {}
     by_template: Dict[str, list] = {template: [] for template in CARD_WEIGHTS}
     for stock in universe.values():
-        template = infer_template_code_from_basic_industry(stock.classification.basic_industry)
+        template = infer_template_code(
+            macro_sector=stock.classification.macro_sector,
+            sector=stock.classification.sector,
+            industry=stock.classification.industry,
+            basic_industry=stock.classification.basic_industry,
+        )
         by_template.setdefault(template, []).append(stock)
 
     for template, cards in CARD_WEIGHTS.items():

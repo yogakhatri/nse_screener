@@ -4,6 +4,10 @@ Screens NSE stocks using six scoring cards (Performance, Valuation, Growth, Prof
 
 ## Quick Start
 
+### macOS / Linux
+
+Use this path if you are on macOS or Linux, or on Windows with WSL/Git Bash and GNU `make`.
+
 ### 1. Setup (once)
 
 ```bash
@@ -73,6 +77,122 @@ make dashboard
 ```
 
 The dashboard must be started with Streamlit, not with plain Python.
+
+### Windows (PowerShell)
+
+Use this path for native Windows PowerShell. The Makefile targets are Unix-oriented, so on native Windows it is simpler to run the Python scripts directly in sequence.
+
+### 1. Setup (once)
+
+```powershell
+git clone <repo> nse_screener
+cd nse_screener
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python scripts/bootstrap.py --sample-row
+```
+
+### 2. Set variables
+
+```powershell
+$env:RUN_DATE = Get-Date -Format 'yyyy-MM-dd'
+$UNIVERSE = "data/raw/universe/nse_symbols_$env:RUN_DATE.csv"
+$SCREENER = "data/raw/fundamentals/screener/screener_export_$env:RUN_DATE.csv"
+```
+
+### 3. Fetch universe
+
+```powershell
+python scripts/fetch_nse_universe.py `
+  --date $env:RUN_DATE `
+  --output-csv $UNIVERSE `
+  --report-json "data/processed/universe/universe_fetch_$env:RUN_DATE.json" `
+  --classification-csv "data/raw/classification/nse_symbol_classification_master.csv" `
+  --missing-classification-csv "data/processed/universe/missing_classification_$env:RUN_DATE.csv" `
+  --force
+```
+
+### 4. Scrape fundamentals
+
+```powershell
+# Test with 50 stocks first
+python scripts/fetch_fundamentals_screener.py `
+  --universe $UNIVERSE `
+  --output $SCREENER `
+  --date $env:RUN_DATE `
+  --limit 50 `
+  --workers 1 `
+  --delay 1.5
+
+# Full scrape
+python scripts/fetch_fundamentals_screener.py `
+  --universe $UNIVERSE `
+  --output $SCREENER `
+  --date $env:RUN_DATE `
+  --workers 3 `
+  --delay 3.0
+```
+
+### 5. Backfill price history (once)
+
+```powershell
+python scripts/fetch_price_history.py `
+  --end-date $env:RUN_DATE `
+  --sessions 260 `
+  --max-calendar-days 520
+```
+
+### 6. Enrich and run
+
+For scraper-built data, use debug mode:
+
+```powershell
+python scripts/enrich_fundamentals.py `
+  --input $SCREENER `
+  --output $SCREENER `
+  --report "data/processed/enrichment_report_$env:RUN_DATE.json"
+
+python scripts/run_engine.py `
+  --date $env:RUN_DATE `
+  --mode live `
+  --market-mode auto `
+  --screener-csv $SCREENER `
+  --skip-quality-gate
+```
+
+For strict production-quality runs with a separate curated fundamentals file, prepare the universe with that file and run without `--skip-quality-gate`:
+
+```powershell
+$FULL_FUND = "data/raw/fundamentals/screener/full_fundamentals_$env:RUN_DATE.csv"
+
+python scripts/prepare_universe.py `
+  --date $env:RUN_DATE `
+  --universe-csv $UNIVERSE `
+  --fundamentals-csv $FULL_FUND `
+  --output-csv $SCREENER `
+  --report-json "data/processed/universe/universe_prep_$env:RUN_DATE.json" `
+  --force
+
+python scripts/enrich_fundamentals.py `
+  --input $SCREENER `
+  --output $SCREENER `
+  --report "data/processed/enrichment_report_$env:RUN_DATE.json"
+
+python scripts/run_engine.py `
+  --date $env:RUN_DATE `
+  --mode live `
+  --market-mode auto `
+  --screener-csv $SCREENER
+```
+
+### 7. View results
+
+```powershell
+Get-Content "runs/$env:RUN_DATE/buy_candidates.csv"
+streamlit run app.py
+```
 
 ---
 
@@ -166,7 +286,7 @@ The dashboard reads run artifacts from `runs/<YYYY-MM-DD>/` and lets you inspect
 
 ### Start the dashboard
 
-Use either of these:
+macOS / Linux:
 
 ```bash
 make dashboard
@@ -176,6 +296,13 @@ or
 
 ```bash
 source .venv/bin/activate
+streamlit run app.py
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
 streamlit run app.py
 ```
 
@@ -208,13 +335,15 @@ That usually means the app was launched with the wrong command.
 
 ### Typical dashboard workflow
 
-1. Run the pipeline first:
+1. Run the pipeline first.
 
 ```bash
 make daily-run RUN_DATE=$RUN_DATE
 ```
 
-2. Start the dashboard:
+   Windows PowerShell users should use the Windows sequence from the Quick Start section instead of `make daily-run`.
+
+2. Start the dashboard.
 
 ```bash
 make dashboard
@@ -237,6 +366,13 @@ make dashboard
 
 ```bash
 source .venv/bin/activate
+streamlit run app.py --server.port 8502
+```
+
+  Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
 streamlit run app.py --server.port 8502
 ```
 

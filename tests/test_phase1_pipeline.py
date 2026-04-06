@@ -6,7 +6,7 @@ import pandas as pd
 
 from engine import NSEClassification, RawStockData, Template
 from engine.cards import score_red_flags
-from engine.config import CARD_WEIGHTS, validate_runtime_config
+from engine.config import CARD_WEIGHTS, infer_template_code, validate_runtime_config
 from engine.metric_definitions import compute_default_distress
 from engine.scoring import score_metric
 from scripts.load_data import load_from_screener, metric_coverage, validate_loader_support
@@ -197,6 +197,35 @@ class Phase1PipelineTests(unittest.TestCase):
         self.assertEqual(coverage["B"]["performance"]["n_stocks"], 1)
         self.assertEqual(coverage["C"]["performance"]["n_stocks"], 0)
 
+    def test_template_inference_handles_current_financial_taxonomy_labels(self) -> None:
+        self.assertEqual(
+            infer_template_code(
+                macro_sector="Financial Services",
+                sector="Financial Services",
+                industry="Private Sector Bank",
+                basic_industry="Banks",
+            ),
+            "B",
+        )
+        self.assertEqual(
+            infer_template_code(
+                macro_sector="Financial Services",
+                sector="Financial Services",
+                industry="Non Banking Financial Company (NBFC)",
+                basic_industry="Finance",
+            ),
+            "C",
+        )
+        self.assertEqual(
+            infer_template_code(
+                macro_sector="Financial Services",
+                sector="Financial Services",
+                industry="Investment Company",
+                basic_industry="Finance",
+            ),
+            "A",
+        )
+
     def test_template_quality_report_flags_unsupported_template(self) -> None:
         general_fundamentals = {
             metric: 10.0
@@ -251,10 +280,57 @@ class Phase1PipelineTests(unittest.TestCase):
 
         engine = NSERatingEngine(universe)
         ratings = engine.rate_universe()
-        apply_template_support_overrides(ratings, template_quality_report(universe))
+        apply_template_support_overrides(ratings, template_quality_report(universe), enforce=True)
         self.assertEqual(ratings["BANK1"].investability_status, "Unsupported Data")
         self.assertEqual(ratings["BANK1"].recommendation, "Unsupported")
         self.assertFalse(ratings["BANK1"].template_supported)
+
+    def test_apply_template_support_override_debug_mode_preserves_rating(self) -> None:
+        bank_fundamentals = {metric: 10.0 for metric in CARD_WEIGHTS["B"]["performance"]}
+        universe = {
+            "BANK1": RawStockData(
+                ticker="BANK1",
+                name="BANK1",
+                classification=NSEClassification(
+                    macro_sector="Financial Services",
+                    sector="Financial Services",
+                    industry="Banking",
+                    basic_industry="Private Sector Bank",
+                ),
+                fundamentals=bank_fundamentals,
+            ),
+            "BANK2": RawStockData(
+                ticker="BANK2",
+                name="BANK2",
+                classification=NSEClassification(
+                    macro_sector="Financial Services",
+                    sector="Financial Services",
+                    industry="Banking",
+                    basic_industry="Private Sector Bank",
+                ),
+                fundamentals=bank_fundamentals,
+            ),
+        }
+        from engine import NSERatingEngine
+
+        engine = NSERatingEngine(universe)
+        ratings = engine.rate_universe()
+        before = ratings["BANK1"]
+        before_status = before.investability_status
+        before_recommendation = before.recommendation
+        before_gate = before.investability_gate_passed
+        before_note = before.action_note
+
+        apply_template_support_overrides(ratings, template_quality_report(universe), enforce=False)
+
+        self.assertEqual(ratings["BANK1"].investability_status, before_status)
+        self.assertEqual(ratings["BANK1"].recommendation, before_recommendation)
+        self.assertEqual(ratings["BANK1"].investability_gate_passed, before_gate)
+        self.assertFalse(ratings["BANK1"].template_supported)
+        self.assertEqual(ratings["BANK1"].template_support_status, "Unsupported Template Coverage")
+        self.assertIn("Template unsupported (debug only):", ratings["BANK1"].action_note)
+        if before_note:
+            self.assertIn(before_note, ratings["BANK1"].action_note)
 
     def test_load_from_screener_prefers_price_history_metrics(self) -> None:
         history = pd.DataFrame(
@@ -352,6 +428,51 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertAlmostEqual(stock.fundamentals["roe_adj_pb"], 0.125, places=6)
             self.assertIsNotNone(stock.fundamentals["fair_value_gap"])
             self.assertIsNotNone(stock.fundamentals["discount_to_fair_pb"])
+
+    def test_load_from_screener_derives_general_roe_adjusted_pb(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "AAA",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                        "Price to Book value": "3.0",
+                        "ROE": "15",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["AAA"]
+            self.assertAlmostEqual(stock.fundamentals["roe_adj_pb"], 0.2, places=6)
+            self.assertIsNone(stock.fundamentals.get("fair_value_gap"))
+
+    def test_load_from_screener_excludes_fund_like_instruments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "ETF1",
+                        "Name": "Sample Banking ETF",
+                    },
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "Operating Company Ltd",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                    },
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            self.assertNotIn("ETF1", universe)
+            self.assertIn("AAA", universe)
 
     def test_red_flags_uses_raw_pledge_percentage_for_disqualifier(self) -> None:
         stock = _stock(

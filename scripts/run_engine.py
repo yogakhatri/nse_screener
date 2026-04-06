@@ -256,7 +256,12 @@ def template_quality_blockers(template_quality: dict) -> List[str]:
     return blockers
 
 
-def apply_template_support_overrides(ratings: Dict[str, object], template_quality: dict) -> None:
+def apply_template_support_overrides(
+    ratings: Dict[str, object],
+    template_quality: dict,
+    *,
+    enforce: bool = True,
+) -> None:
     for rating in ratings.values():
         info = template_quality.get(rating.template.value, {})
         supported = bool(info.get("supported", False))
@@ -265,6 +270,13 @@ def apply_template_support_overrides(ratings: Dict[str, object], template_qualit
         rating.template_support_status = "Supported" if supported else "Unsupported Template Coverage"
         rating.template_support_reasons = blockers
         if supported:
+            continue
+        if not enforce:
+            note = "Template unsupported (debug only): " + "; ".join(blockers)
+            if rating.action_note:
+                rating.action_note = f"{rating.action_note}; {note}"
+            else:
+                rating.action_note = note
             continue
         rating.investability_status = "Unsupported Data"
         rating.recommendation = "Unsupported"
@@ -291,6 +303,7 @@ LEADERBOARD_COLUMNS = [
     "growth",
     "profitability",
     "entry_point",
+    "contrarian",
     "red_flags",
     "opportunity_score",
     "investability_status",
@@ -537,7 +550,11 @@ def main() -> None:
 
     engine = NSERatingEngine(universe, market_mode=args.market_mode)
     ratings = engine.rate_universe()
-    apply_template_support_overrides(ratings, template_quality)
+    apply_template_support_overrides(
+        ratings,
+        template_quality,
+        enforce=not args.skip_quality_gate,
+    )
     leaderboard = engine.to_leaderboard(
         ratings,
         exclude_statuses=("Insufficient Data", "Unsupported Data", "Uninvestable"),
