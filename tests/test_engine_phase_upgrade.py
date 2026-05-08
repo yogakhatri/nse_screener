@@ -1,12 +1,13 @@
 import unittest
 
 from engine import NSERatingEngine, RawStockData, NSEClassification
-from engine.advanced import action_sheet_rows, portfolio_plan_rows
+from engine.advanced import action_sheet_rows, daily_market_list_rows, portfolio_plan_rows
 from engine.bias_controls import BiasAudit
 from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS
 from engine.metric_definitions import compute_cagr_3y
 from engine.models import Template
+from scripts.run_engine import data_quality_summary_rows
 
 
 def _make_stock(ticker: str, pe: float, growth: float, pledge: float = 0.0) -> RawStockData:
@@ -63,6 +64,10 @@ def _make_stock(ticker: str, pe: float, growth: float, pledge: float = 0.0) -> R
             basic_industry="Computers - Software & Consulting",
         ),
         fundamentals=fundamentals,
+        classification_source="unit_test_master",
+        classification_confidence="High",
+        fundamentals_source="unit_test",
+        price_source="unit_test",
     )
 
 
@@ -87,7 +92,7 @@ class PhaseUpgradeTests(unittest.TestCase):
         rating = ratings["AAA"]
         payload = rating.to_dict()
 
-        self.assertIn(rating.recommendation, {"Buy Candidate", "Watchlist", "Avoid"})
+        self.assertIn(rating.recommendation, {"Buy Candidate", "Watchlist", "Avoid", "Insufficient Data"})
         self.assertIn(rating.recommendation_confidence, {"High", "Medium", "Low"})
         self.assertIn("recommendation", payload)
         self.assertIn("potential_score", payload)
@@ -120,8 +125,108 @@ class PhaseUpgradeTests(unittest.TestCase):
         self.assertGreaterEqual(len(actions), 1)
         self.assertIn("investability_status", actions[0])
         self.assertIn("template_support_status", actions[0])
+        self.assertIn("research_status", actions[0])
         portfolio = portfolio_plan_rows(leaderboard)
         self.assertIsInstance(portfolio, list)
+
+    def test_daily_market_list_caps_financials(self) -> None:
+        leaderboard = [
+            {
+                "ticker": "BANK1",
+                "sector": "Financial Services",
+                "template": "B",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 90.0,
+            },
+            {
+                "ticker": "BANK2",
+                "sector": "Financial Services",
+                "template": "B",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 89.0,
+            },
+            {
+                "ticker": "BANK3",
+                "sector": "Financial Services",
+                "template": "B",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 88.0,
+            },
+            {
+                "ticker": "NBFC1",
+                "sector": "Financial Services",
+                "template": "C",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 87.0,
+            },
+            {
+                "ticker": "IND1",
+                "sector": "Industrials",
+                "template": "A",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 86.0,
+            },
+            {
+                "ticker": "HC1",
+                "sector": "Healthcare",
+                "template": "A",
+                "template_supported": True,
+                "research_status": "Research Candidate",
+                "recommendation": "Watchlist",
+                "confidence": "Medium",
+                "selection_score": 85.0,
+            },
+        ]
+        rows = daily_market_list_rows(leaderboard)
+        financials = [row for row in rows if row["template"] in {"B", "C"}]
+        self.assertLessEqual(len(financials), 3)
+
+    def test_actionable_requires_usable_data_quality(self) -> None:
+        stock = _make_stock("WEAKDATA", pe=22.0, growth=8.0)
+        stock.classification_source = "unknown"
+        stock.classification_confidence = "Low"
+        stock.fundamentals_source = "unknown"
+        stock.price_source = "missing"
+
+        engine = NSERatingEngine({"WEAKDATA": stock}, market_mode="neutral")
+        ratings = engine.rate_universe()
+        rating = ratings["WEAKDATA"]
+
+        self.assertLess(rating.data_quality_score, 65.0)
+        self.assertIn(rating.data_quality_status, {"Weak Data", "Research Only Data"})
+        self.assertNotEqual(rating.research_status, "Actionable")
+        self.assertTrue(any("Data quality" in reason for reason in rating.gate_fail_reasons))
+
+    def test_data_quality_summary_groups_sources(self) -> None:
+        engine = NSERatingEngine(self.universe, market_mode="neutral")
+        ratings = engine.rate_universe()
+        rows = data_quality_summary_rows(ratings)
+        groups = {row["group"] for row in rows}
+        self.assertIn("data_quality_status", groups)
+        self.assertIn("price_source", groups)
+
+    def test_rating_exposes_metric_source_summary(self) -> None:
+        engine = NSERatingEngine(self.universe, market_mode="neutral")
+        ratings = engine.rate_universe()
+        rating = ratings["AAA"]
+        self.assertIsInstance(rating.metric_source_summary, dict)
+        payload = rating.to_dict()
+        self.assertIn("field_provenance", payload)
 
     def test_stage1_asm_is_not_forced_disqualifier(self) -> None:
         stock = _make_stock("ASM1", pe=25.0, growth=1.5)

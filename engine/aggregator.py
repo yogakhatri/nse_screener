@@ -150,7 +150,9 @@ def _confidence_label(rating: StockRating, cards: dict) -> str:
     return "Low"
 
 def _recommendation(rating: StockRating) -> str:
-    if rating.investability_status in ("Uninvestable", "Avoid", "Insufficient Data"):
+    if rating.investability_status == "Insufficient Data":
+        return "Insufficient Data"
+    if rating.investability_status in ("Uninvestable", "Avoid"):
         return "Avoid"
     if rating.red_flags.score is not None and rating.red_flags.score < 40:
         return "Avoid"

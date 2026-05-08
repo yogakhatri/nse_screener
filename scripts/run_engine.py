@@ -9,6 +9,7 @@ import csv
 import datetime as dt
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,12 +18,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from engine import NSERatingEngine
 from engine.advanced import (
     action_sheet_rows,
+    daily_market_list_rows,
     evaluate_recommendation_outcomes,
     portfolio_plan_rows,
+    template_daily_rows,
     update_recommendation_history,
 )
 from engine.bias_controls import BiasAudit
 from engine.config import (
+    BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES,
     CARD_WEIGHTS,
     MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT,
     MIN_TEMPLATE_CARD_RANKABLE_PCT,
@@ -31,8 +35,9 @@ from engine.config import (
     configured_core_cards,
     validate_runtime_config,
 )
-from scripts.load_data import load_from_screener, metric_coverage
+from scripts.load_data import load_from_screener, metric_coverage, metric_provenance_rows
 from scripts.local_storage import RunLogger
+from scripts.source_registry import _infer_source_data_date, build_registry, write_registry
 
 CORE_CARDS = list(configured_core_cards())
 
@@ -94,6 +99,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip input quality gate checks (not recommended for live use)",
     )
+    parser.add_argument(
+        "--strict-source-registry",
+        action="store_true",
+        help="Fail if any required public source is missing, stale, or low coverage",
+    )
     return parser.parse_args()
 
 
@@ -111,10 +121,15 @@ def validate_screener_freshness(path: Path, run_date: dt.date, strict: bool) -> 
     warnings: List[str] = []
     if not path.exists():
         return warnings
-    file_date = dt.date.fromtimestamp(path.stat().st_mtime)
-    age_days = (run_date - file_date).days
+    data_date = _infer_source_data_date(path)
+    file_date = data_date or dt.date.fromtimestamp(path.stat().st_mtime)
+    age_days = max(0, (run_date - file_date).days)
     if age_days > 120:
-        msg = f"Screener CSV looks stale ({age_days} days old; updated {file_date.isoformat()})."
+        freshness_kind = "data date" if data_date else "mtime fallback"
+        msg = (
+            f"Screener CSV looks stale ({age_days} days old; "
+            f"{freshness_kind} {file_date.isoformat()})."
+        )
         if strict:
             raise RuntimeError(msg)
         warnings.append(msg)
@@ -280,6 +295,8 @@ def apply_template_support_overrides(
             continue
         rating.investability_status = "Unsupported Data"
         rating.recommendation = "Unsupported"
+        rating.recommendation_reason_codes = ["UNSUPPORTED_TEMPLATE"]
+        rating.recommendation_reasons = ["Template coverage is not strong enough to publish a reliable score."]
         rating.investability_gate_passed = False
         reasons = list(rating.gate_fail_reasons)
         reasons.extend(blockers)
@@ -288,7 +305,55 @@ def apply_template_support_overrides(
             if reason not in deduped:
                 deduped.append(reason)
         rating.gate_fail_reasons = deduped
+        rating.recommendation_risk_flags = deduped
         rating.action_note = "Template unsupported: " + "; ".join(blockers)
+        rating.analysis_caveat = (
+            "Internal research output, not investment advice. Template coverage is incomplete; "
+            "do not rely on this stock score."
+        )
+
+
+def refresh_research_status(ratings: Dict[str, object]) -> None:
+    """
+    Reconcile research workflow labels after template support overrides.
+
+    `apply_advanced_overlays()` runs before template support is enforced, so we
+    need a final pass once unsupported templates have been marked.
+    """
+    for rating in ratings.values():
+        if not getattr(rating, "template_supported", False):
+            rating.research_status = "Unsupported"
+            rating.research_status_reason = "Template coverage is incomplete"
+
+
+def data_quality_summary_rows(ratings: Dict[str, object]) -> List[dict]:
+    """
+    Summarise source confidence and research readiness for run diagnostics.
+    """
+    counters = {
+        "data_quality_status": Counter(),
+        "research_status": Counter(),
+        "classification_confidence": Counter(),
+        "fundamentals_source": Counter(),
+        "price_source": Counter(),
+    }
+    for rating in ratings.values():
+        for key, counter in counters.items():
+            counter[str(getattr(rating, key, "") or "unknown")] += 1
+
+    rows: List[dict] = []
+    for group, counter in counters.items():
+        total = sum(counter.values()) or 1
+        for value, count in sorted(counter.items(), key=lambda item: (-item[1], item[0])):
+            rows.append(
+                {
+                    "group": group,
+                    "value": value,
+                    "count": count,
+                    "pct": round(count / total * 100.0, 2),
+                }
+            )
+    return rows
 
 
 LEADERBOARD_COLUMNS = [
@@ -311,8 +376,14 @@ LEADERBOARD_COLUMNS = [
     "valuation_gap_score",
     "recommendation",
     "confidence",
+    "confidence_score",
+    "reason_codes",
+    "recommendation_reasons",
+    "risk_flags",
     "entry_signal",
     "market_mode",
+    "market_regime_source",
+    "market_regime_confidence",
     "sector_regime_score",
     "sector_regime_label",
     "drawdown_resilience_score",
@@ -324,11 +395,33 @@ LEADERBOARD_COLUMNS = [
     "selection_score",
     "gate_passed",
     "gate_fail_reasons",
+    "peer_group_quality",
+    "peer_group_reasons",
     "template_supported",
     "template_support_status",
     "template_support_reason",
+    "classification_source",
+    "classification_confidence",
+    "fundamentals_source",
+    "price_source",
+    "research_status",
+    "research_status_reason",
+    "data_quality_score",
+    "data_quality_status",
+    "data_quality_reasons",
+    "missing_critical_fields",
+    "unknown_risk_flags",
+    "value_trap_score",
+    "value_trap_flags",
+    "calibration_status",
+    "calibration_multiplier",
+    "metric_source_summary",
+    "valuation_metric_sources",
+    "price_metric_sources",
+    "risk_metric_sources",
     "staged_entry_plan",
     "action_note",
+    "analysis_caveat",
     "sector_rank",
     "sector_percentile",
     "basic_industry_rank",
@@ -491,7 +584,8 @@ def main() -> None:
             min_core_cards_with_rankable=args.min_core_cards_with_rankable,
             min_classification_coverage_pct=args.min_classification_coverage_pct,
         )
-        blockers.extend(template_quality_blockers(template_quality))
+        if BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES:
+            blockers.extend(template_quality_blockers(template_quality))
         if blockers:
             details = ", ".join(
                 f"{card}={pct:.1f}%" for card, pct in quality["core_rankable_pct"].items()
@@ -523,11 +617,43 @@ def main() -> None:
 
     logger = RunLogger(run_date=run_date)
     logger.start()
-    logger.log_input(
-        source_id="screener_export",
-        file_path=screener_csv,
-        freshness_ts=dt.datetime.fromtimestamp(screener_csv.stat().st_mtime).isoformat(timespec="seconds"),
+    out_dir = Path("runs") / run_date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    source_registry = build_registry(run_date=run_date, screener_csv=screener_csv)
+    write_registry(
+        source_registry,
+        out_dir / "source_registry.json",
+        out_dir / "source_registry.csv",
     )
+    if args.strict_source_registry and source_registry["required_blockers"]:
+        blockers = [
+            f"{row['source_id']}: {row['status']} ({row.get('notes') or row.get('path')})"
+            for row in source_registry["required_blockers"]
+        ]
+        raise RuntimeError(
+            "\n".join(
+                [
+                    "SOURCE REGISTRY GATE FAILED:",
+                    *[f"- {msg}" for msg in blockers],
+                    "Fix required source freshness/coverage or rerun without --strict-source-registry for diagnostics.",
+                ]
+            )
+        )
+
+    for source in source_registry["sources"]:
+        if source.get("quality_status") != "usable":
+            continue
+        path = Path(source["path"])
+        if source.get("source_type") == "directory" and source.get("latest_file"):
+            path = path / source["latest_file"]
+        if not path.exists():
+            continue
+        logger.log_input(
+            source_id=source["source_id"],
+            file_path=path,
+            freshness_ts=source.get("latest_mtime") or dt.datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+        )
 
     audit = BiasAudit(list(universe.keys()), CARD_WEIGHTS)
     try:
@@ -548,20 +674,18 @@ def main() -> None:
     for warning in freshness_warnings + report["warnings"]:
         print(f"⚠️  {warning}")
 
-    engine = NSERatingEngine(universe, market_mode=args.market_mode)
+    engine = NSERatingEngine(universe, market_mode=args.market_mode, run_date=run_date)
     ratings = engine.rate_universe()
     apply_template_support_overrides(
         ratings,
         template_quality,
         enforce=not args.skip_quality_gate,
     )
+    refresh_research_status(ratings)
     leaderboard = engine.to_leaderboard(
         ratings,
         exclude_statuses=("Insufficient Data", "Unsupported Data", "Uninvestable"),
     )
-
-    out_dir = Path("runs") / run_date_str
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     for ticker, rating in ratings.items():
         with open(out_dir / f"stock_{ticker}.json", "w") as f:
@@ -591,6 +715,25 @@ def main() -> None:
         json.dump(quality, f, indent=2)
     with open(out_dir / "template_support.json", "w") as f:
         json.dump(template_quality, f, indent=2)
+    _write_csv(
+        out_dir / "data_quality_summary.csv",
+        data_quality_summary_rows(ratings),
+        fieldnames=["group", "value", "count", "pct"],
+    )
+    _write_csv(
+        out_dir / "metric_provenance.csv",
+        metric_provenance_rows(universe),
+        fieldnames=[
+            "ticker",
+            "metric",
+            "value",
+            "source",
+            "source_field",
+            "confidence",
+            "freshness",
+            "method",
+        ],
+    )
 
     buy_candidates, undervalued, red_flag_exclusions = _build_action_lists(leaderboard)
     _write_csv(out_dir / "buy_candidates.csv", buy_candidates, fieldnames=LEADERBOARD_COLUMNS)
@@ -644,10 +787,26 @@ def main() -> None:
             "template_supported",
             "template_support_status",
             "template_support_reason",
+            "classification_source",
+            "classification_confidence",
+            "fundamentals_source",
+            "price_source",
+            "research_status",
+            "research_status_reason",
+            "data_quality_score",
+            "data_quality_status",
+            "data_quality_reasons",
+            "metric_source_summary",
             "investability_status",
             "recommendation",
             "confidence",
+            "confidence_score",
+            "reason_codes",
+            "recommendation_reasons",
+            "risk_flags",
             "market_mode",
+            "market_regime_source",
+            "market_regime_confidence",
             "sector_regime",
             "selection_score",
             "potential_score",
@@ -659,9 +818,23 @@ def main() -> None:
             "staged_entry_plan",
             "gate_passed",
             "gate_fail_reasons",
+            "peer_group_quality",
+            "peer_group_reasons",
+            "missing_critical_fields",
+            "unknown_risk_flags",
+            "value_trap_score",
+            "value_trap_flags",
+            "calibration_status",
+            "calibration_multiplier",
             "action_note",
+            "analysis_caveat",
         ],
     )
+
+    daily_market_list = daily_market_list_rows(leaderboard)
+    _write_csv(out_dir / "daily_market_list.csv", daily_market_list, fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_bank_list.csv", template_daily_rows(leaderboard, "B"), fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_nbfc_list.csv", template_daily_rows(leaderboard, "C"), fieldnames=LEADERBOARD_COLUMNS)
 
     portfolio_plan = portfolio_plan_rows(leaderboard)
     _write_csv(
@@ -687,6 +860,7 @@ def main() -> None:
     print(f"Run complete ({run_mode}) on {run_date_str}")
     print(f"Stocks rated: {len(ratings)}")
     print(f"Buy candidates: {len(buy_candidates)}")
+    print(f"Daily market list: {len(daily_market_list)}")
     print(f"Market mode: {engine.market_mode}")
     print(f"Portfolio picks: {len(portfolio_plan)}")
     print(f"Outputs: {out_dir}")

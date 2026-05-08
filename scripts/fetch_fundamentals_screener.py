@@ -68,6 +68,7 @@ except ImportError:
 OUTPUT_COLUMNS = [
     "NSE Symbol", "Name",
     "Macro Sector", "Sector", "Industry", "Basic Industry",
+    "Classification Source", "Classification Confidence", "Fundamentals Source",
     "P/E", "Price to Book value", "EV / EBITDA", "FCF Yield",
     "Sales growth 3Years", "Profit growth 3Years",
     "Sales growth", "Profit growth",          # YoY
@@ -94,7 +95,9 @@ OUTPUT_COLUMNS = [
     "Margin Trend", "CFO/PAT", "FCF Consistency", "Growth Stability",
 ]
 
-CACHE_SCHEMA_VERSION = 3
+# Bump whenever scraper output semantics change so stale cached rows do not
+# silently preserve obsolete classifications or pre-fix derived metrics.
+CACHE_SCHEMA_VERSION = 4
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -320,6 +323,13 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         els = tree.xpath(f'//a[@title="{title_attr}"]')
         if els:
             row[col] = els[0].text_content().strip()
+    if row.get("Sector") and row.get("Industry") and row.get("Basic Industry"):
+        row["Classification Source"] = "screener_public_page"
+        row["Classification Confidence"] = "High"
+    elif row.get("Sector") or row.get("Industry") or row.get("Basic Industry"):
+        row["Classification Source"] = "screener_public_page"
+        row["Classification Confidence"] = "Medium"
+    row["Fundamentals Source"] = "screener_public_page"
 
     # ── Top-ratios box ─────────────────────────────────────────────────────────
     top = _top_ratios(tree)
@@ -492,17 +502,39 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
         bs_headers = [th.text_content().strip() for th in bs_tables[0].xpath('.//thead/tr/th')]
 
         borrow_row = _find_row(bs, "Borrowings", "Total Debt", "Long-term borrowings")
-        equity_row = _find_row(bs, "Equity Capital", "Total Equity", "Shareholders Equity")
+        networth_row = _find_row(bs, "Net Worth", "Total Equity", "Shareholders Equity", "Shareholders' Funds")
+        equity_capital_row = _find_row(bs, "Equity Capital")
+        reserves_row = _find_row(bs, "Reserves", "Reserves and Surplus")
 
-        if borrow_row and equity_row and "Debt to equity" not in row:
+        sector_text = " ".join(
+            str(row.get(key, "")).strip().lower()
+            for key in ("Macro Sector", "Sector", "Industry", "Basic Industry")
+        )
+        is_financial = any(token in sector_text for token in ("bank", "nbfc", "financial services", "housing finance"))
+
+        if borrow_row and "Debt to equity" not in row and not is_financial:
             b = _f(borrow_row[-1]) if borrow_row else None
-            e = _f(equity_row[-1]) if equity_row else None
+            e = None
+            if networth_row:
+                e = _f(networth_row[-1])
+            elif equity_capital_row and reserves_row:
+                eq_cap = _f(equity_capital_row[-1])
+                reserves = _f(reserves_row[-1])
+                if eq_cap is not None and reserves is not None:
+                    e = eq_cap + reserves
             if b is not None and e and e > 0:
                 row["Debt to equity"] = round(b / e, 2)
             # D/E previous year for Piotroski F5
-            if len(borrow_row) >= 2 and len(equity_row) >= 2:
+            if len(borrow_row) >= 2:
                 b1 = _f(borrow_row[-2]) if len(borrow_row) >= 2 else None
-                e1 = _f(equity_row[-2]) if len(equity_row) >= 2 else None
+                e1 = None
+                if networth_row and len(networth_row) >= 2:
+                    e1 = _f(networth_row[-2])
+                elif equity_capital_row and reserves_row and len(equity_capital_row) >= 2 and len(reserves_row) >= 2:
+                    eq_cap1 = _f(equity_capital_row[-2])
+                    reserves1 = _f(reserves_row[-2])
+                    if eq_cap1 is not None and reserves1 is not None:
+                        e1 = eq_cap1 + reserves1
                 if b1 is not None and e1 is not None and e1 > 0:
                     row["D/E Prev Year"] = round(b1 / e1, 2)
 
@@ -702,7 +734,8 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             lbl = label[0].text_content().strip()
             v = _f(val[0].text_content())
             if "NIM" in lbl:
-                row["NIM"] = v
+                if v is not None and 0 <= v <= 20 and ("NIM" not in row or _f(row.get("NIM")) is None or _f(row.get("NIM")) < 0):
+                    row["NIM"] = v
             elif "ROE" in lbl:
                 row["ROE"] = v
             elif "GNPA" in lbl or "Gross NPA" in lbl:
@@ -710,11 +743,14 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             elif "NNPA" in lbl or "Net NPA" in lbl:
                 row["NNPA %"] = v
             elif "CAR" in lbl or "Capital Adequacy" in lbl:
-                row["CAR %"] = v
+                if v is not None and 0 <= v <= 100:
+                    row["CAR %"] = v
             elif "PCR" in lbl or "Provision Coverage" in lbl:
-                row["PCR %"] = v
+                if v is not None and 0 <= v <= 100:
+                    row["PCR %"] = v
             elif "Cost to Income" in lbl or "Cost/Income" in lbl:
-                row["Cost to Income"] = v
+                if v is not None and 0 <= v <= 100:
+                    row["Cost to Income"] = v
             elif "Credit Cost" in lbl:
                 row["Credit Cost"] = v
             elif "Slippage" in lbl:

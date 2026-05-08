@@ -1,471 +1,248 @@
 # NSE Sector-Wise Investment Engine
 
-Screens NSE stocks using six scoring cards (Performance, Valuation, Growth, Profitability, Entry Point, Red Flags) and outputs actionable picks: **Buy Candidate**, **Watchlist**, **Avoid** — with staged entry plans.
+## Project Overview
+Internal Indian equity research engine that ranks NSE stocks sector-wise using six analysis cards: Performance, Valuation, Growth, Profitability, Entry Point, and Red Flags. The goal is to find fundamentally strong stocks trading below potential, while separating actionable ideas from research-only or unsupported data.
 
-## Quick Start
+## Tech Stack
+- Python 3.11+
+- pandas, numpy, requests, lxml
+- Streamlit dashboard
+- Makefile-based local workflow
+- CSV/JSON artifacts under `data/`, `runs/`, and `logs/`
+- Public data sources only: NSE archives/bhavcopy, Screener public pages, optional BSE/NSE public endpoints, local CSV fallbacks
 
-### macOS / Linux
+## Current Status
+Implemented:
+- NSE universe fetch from public bhavcopy with classification master enrichment.
+- Public Screener fundamentals scraper with local cache and cache-schema invalidation.
+- Local classification master builder: `make build-classification`.
+- Raw bhavcopy price-history support for price/technical metrics.
+- Template-aware scoring for general companies, banks, and NBFC/HFC-style financials.
+- Six-card stock scorecard: Performance, Valuation, Growth, Profitability, Entry Point, Red Flags.
+- Advanced overlays: market regime, potential score, valuation-gap score, expected upside/downside, risk/reward, staged entry plan, sector regime, portfolio caps.
+- Research workflow labels: `Actionable`, `Research Candidate`, `Rejected`, `Unsupported`.
+- Data-quality scoring based on classification confidence, fundamentals source, price source, card coverage, and valuation evidence.
+- Critical-risk data gating: missing pledge, liquidity, governance, debt-service, and bank/NBFC asset-quality inputs now reduce confidence and block Buy Candidate output.
+- Peer-group quality gating: weak peer groups are exposed and blocked from actionable recommendations.
+- First-class `Insufficient Data` recommendation state instead of silently converting weak-data rows to `Avoid`.
+- Recommendation reason codes, analyst-readable reasons, risk flags, value-trap flags, and model caveats are included in JSON/CSV outputs.
+- Value-trap detection for cheap-looking stocks with weak growth, margins, cash conversion, leverage, red flags, or sector headwinds.
+- Market-regime inference now records source/confidence and prefers cached NSE index data when available, with stock-breadth fallback.
+- Optional backtest-derived calibration profile support via `data/processed/model_calibration.json`.
+- Source registry for every run: required/optional source status, freshness, hashes, row counts, file counts, and quality status.
+- Field-level metric provenance: each populated normalized metric records source, source field, confidence, and method.
+- Major provenance summaries are surfaced in the leaderboard for valuation, price, and risk metrics.
+- Sector-aware intrinsic value models: Template A uses conservative EPV/Graham value with sector and quality adjustments; banks/NBFCs use asset-quality adjusted fair P/B.
+- Banks/NBFCs are included but capped in the mixed daily market list so they do not dominate results.
+- Separate daily lists for banks and NBFCs.
+- Input quality gate and template support gate to prevent misleading production outputs.
+- Config validation through `make check-config`.
+- Unit test coverage for classification, quality gates, data-quality gating, financial caps, and loader behavior.
 
-Use this path if you are on macOS or Linux, or on Windows with WSL/Git Bash and GNU `make`.
+Latest local validation:
+- Command: `make run RUN_DATE=2026-04-09 SCREENER_CSV=data/raw/fundamentals/screener/screener_export_2026-04-09.csv`
+- Stocks rated: 2,133
+- Leaderboard rows: 1,351
+- Buy candidates: 0
+- Daily market list: 15 Watchlist / Research Candidate rows
+- Market mode: bear
+- Reason for zero buys: current local data is missing critical pledge, governance, and/or debt-service evidence for all rows, so Buy Candidate output is correctly blocked.
+- Tests: `51` unit tests passing
 
-### 1. Setup (once)
+## Run From Scratch
 
+### 1. Clone and install
 ```bash
-git clone <repo> nse_screener
+git clone <repo-url> nse_screener
 cd nse_screener
 make init
 ```
 
 ### 2. Set run date
-
 ```bash
-export RUN_DATE=$(date +%F)   # or e.g. 2026-03-28
+export RUN_DATE=$(date +%F)
 ```
 
-### 3. Fetch universe
+For historical/local testing:
+```bash
+export RUN_DATE=2026-04-09
+```
 
+### 3. Fetch NSE universe
 ```bash
 make fetch-universe RUN_DATE=$RUN_DATE
 ```
 
+This writes:
+- `data/raw/universe/nse_symbols_$RUN_DATE.csv`
+- `data/processed/universe/universe_fetch_$RUN_DATE.json`
+- `data/processed/universe/missing_classification_$RUN_DATE.csv`
+
 ### 4. Scrape fundamentals
-
+Test scrape first:
 ```bash
-# Test with 50 stocks first (~2 min)
-make fetch-screener-data RUN_DATE=$RUN_DATE SCRAPER_LIMIT=50
-
-# Full scrape (~2-3 hrs, resumes on interruption)
-make fetch-screener-data RUN_DATE=$RUN_DATE SCRAPER_WORKERS=6 SCRAPER_DELAY=3.0
+make fetch-screener-data RUN_DATE=$RUN_DATE SCRAPER_LIMIT=50 SCRAPER_WORKERS=1 SCRAPER_DELAY=1.5
 ```
 
-No account needed. Scrapes public screener.in pages. Keep `SCRAPER_WORKERS` <= 3.
+Full scrape:
+```bash
+make fetch-screener-data RUN_DATE=$RUN_DATE SCRAPER_WORKERS=3 SCRAPER_DELAY=3.0
+```
 
-### 5. Backfill price history (once)
+This writes:
+- `data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv`
+- cache files under `data/raw/fundamentals/screener/cache/`
 
+### 5. Refresh classification master
+```bash
+make build-classification RUN_DATE=$RUN_DATE \
+  SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv
+```
+
+This writes:
+- `data/raw/classification/nse_symbol_classification_master.csv`
+
+### 6. Fetch price history
 ```bash
 make fetch-price-history RUN_DATE=$RUN_DATE SESSIONS=260
 ```
 
-### 6. Run
+This writes/uses bhavcopy archives under:
+- `data/raw/prices/bhavcopy/`
 
+### 7. Run the full daily workflow
 ```bash
 make daily-run RUN_DATE=$RUN_DATE
 ```
 
-`daily-run` now has two practical modes:
-
-- If you provide a separate full fundamentals file via `FUNDAMENTALS_CSV=...`, it uses production mode and enforces the input quality gate.
-- If it is using the scraper-built `SCREENER_CSV` from `fetch-screener-data`, it uses debug mode automatically so the run can complete even when coverage is not production-grade.
-
-Typical local usage with scraper-built data:
-
+For strict production mode with a curated full fundamentals file:
 ```bash
-make daily-run RUN_DATE=$RUN_DATE
+make daily-run RUN_DATE=$RUN_DATE \
+  FUNDAMENTALS_CSV=data/raw/fundamentals/screener/full_fundamentals_$RUN_DATE.csv
 ```
 
-Production-style run with a separate curated fundamentals file:
-
+For a direct run using an existing Screener CSV:
 ```bash
-make daily-run RUN_DATE=$RUN_DATE FUNDAMENTALS_CSV=data/raw/fundamentals/screener/full_fundamentals_$RUN_DATE.csv
+make run RUN_DATE=$RUN_DATE \
+  SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv
 ```
 
-### 7. View results
-
+Use debug mode only when diagnosing sparse data:
 ```bash
-cat runs/$RUN_DATE/buy_candidates.csv
+make run-debug RUN_DATE=$RUN_DATE \
+  SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv
+```
+
+### 8. Validate code/config
+```bash
+make check
+make check-config
+make test
+```
+
+Optional strict source validation:
+```bash
+make source-registry RUN_DATE=$RUN_DATE \
+  SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv
+
+python scripts/run_engine.py \
+  --date $RUN_DATE \
+  --screener-csv data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv \
+  --strict-source-registry
+```
+
+### 9. View outputs
+```bash
+ls runs/$RUN_DATE
+cat runs/$RUN_DATE/daily_market_list.csv
 make dashboard
 ```
 
-The dashboard must be started with Streamlit, not with plain Python.
+## Main Outputs
 
-### Windows (PowerShell)
+| File | Purpose |
+|---|---|
+| `leaderboard.csv` | Ranked investable/researchable universe after exclusions |
+| `action_sheet.csv` | Analyst-facing recommendation, confidence, gates, staged entry plan |
+| `daily_market_list.csv` | Mixed daily shortlist with sector and financial caps |
+| `daily_bank_list.csv` | Bank-only research queue |
+| `daily_nbfc_list.csv` | NBFC/HFC-style financial research queue |
+| `buy_candidates.csv` | Stocks that pass Buy Candidate logic |
+| `undervalued_high_potential.csv` | Discount/potential-focused shortlist |
+| `red_flag_exclusions.csv` | Rejected rows with major red-flag/gate issues |
+| `unsupported_stocks.csv` | Stocks/templates that should not be interpreted as supported |
+| `data_quality_summary.csv` | Source confidence and research-readiness summary |
+| `source_registry.json` | Normalized public-source registry with required/optional source status |
+| `source_registry.csv` | Analyst-friendly source registry summary |
+| `metric_provenance.csv` | Per-ticker, per-metric source/confidence/method audit trail |
+| `coverage_by_template_card.csv` | Rankable coverage by template and card |
+| `template_support.csv` | Template support status and blockers |
+| `stock_<TICKER>.json` | Full per-stock scorecard detail |
 
-Use this path for native Windows PowerShell. The Makefile targets are Unix-oriented, so on native Windows it is simpler to run the Python scripts directly in sequence.
+## Key Config Files
 
-### 1. Setup (once)
+### `engine/config.py`
+Primary scoring and gate configuration.
 
-```powershell
-git clone <repo> nse_screener
-cd nse_screener
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python scripts/bootstrap.py --sample-row
-```
+Important sections:
+- Peer minimums: `PEER_MIN_BASIC_INDUSTRY`, `PEER_MIN_INDUSTRY`
+- Card coverage: `CARD_DATA_THRESHOLD`, `MIN_RANKABLE_CARDS`
+- Template quality gate: `MIN_TEMPLATE_*`, `QUALITY_GATE_REQUIRE_ALL_CORE_CARDS`
+- Unsupported-template behavior: `BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES`
+- Market regime: `DEFAULT_MARKET_MODE`, `AUTO_*`
+- Market regime data threshold: `MIN_MARKET_MODE_*`, `INDEX_REGIME_*`
+- Template routing: `TEMPLATE_BANKS`, `TEMPLATE_NBFC`, `TEMPLATE_BANK_INDUSTRIES`, `TEMPLATE_NBFC_INDUSTRIES`
+- Card weights: `CARD_WEIGHTS`
+- Recommendation thresholds: `BUY_*`, `WATCH_*`
+- Hard gates: `GATE_*`, `BEAR_GATE_*`
+- Daily list caps: `DAILY_LIST_*`
+- Data-quality gates: `MIN_DATA_QUALITY_SCORE_ACTIONABLE`, `MIN_DATA_QUALITY_SCORE_RESEARCH`, `GATE_MIN_DATA_QUALITY_SCORE`
+- Critical-risk gates: `GENERAL_CRITICAL_RISK_FIELDS`, `BANK_CRITICAL_RISK_FIELDS`, `NBFC_CRITICAL_RISK_FIELDS`, `MAX_MISSING_CRITICAL_FIELDS_*`
+- Value-trap gates: `VALUE_TRAP_WARN_THRESHOLD`, `VALUE_TRAP_BLOCK_THRESHOLD`
+- Calibration: `CALIBRATION_PROFILE_PATH`, `CALIBRATION_*`
 
-### 2. Set variables
-
-```powershell
-$env:RUN_DATE = Get-Date -Format 'yyyy-MM-dd'
-$UNIVERSE = "data/raw/universe/nse_symbols_$env:RUN_DATE.csv"
-$SCREENER = "data/raw/fundamentals/screener/screener_export_$env:RUN_DATE.csv"
-```
-
-### 3. Fetch universe
-
-```powershell
-python scripts/fetch_nse_universe.py `
-  --date $env:RUN_DATE `
-  --output-csv $UNIVERSE `
-  --report-json "data/processed/universe/universe_fetch_$env:RUN_DATE.json" `
-  --classification-csv "data/raw/classification/nse_symbol_classification_master.csv" `
-  --missing-classification-csv "data/processed/universe/missing_classification_$env:RUN_DATE.csv" `
-  --force
-```
-
-### 4. Scrape fundamentals
-
-```powershell
-# Test with 50 stocks first
-python scripts/fetch_fundamentals_screener.py `
-  --universe $UNIVERSE `
-  --output $SCREENER `
-  --date $env:RUN_DATE `
-  --limit 50 `
-  --workers 1 `
-  --delay 1.5
-
-# Full scrape
-python scripts/fetch_fundamentals_screener.py `
-  --universe $UNIVERSE `
-  --output $SCREENER `
-  --date $env:RUN_DATE `
-  --workers 3 `
-  --delay 3.0
-```
-
-### 5. Backfill price history (once)
-
-```powershell
-python scripts/fetch_price_history.py `
-  --end-date $env:RUN_DATE `
-  --sessions 260 `
-  --max-calendar-days 520
-```
-
-### 6. Enrich and run
-
-For scraper-built data, use debug mode:
-
-```powershell
-python scripts/enrich_fundamentals.py `
-  --input $SCREENER `
-  --output $SCREENER `
-  --report "data/processed/enrichment_report_$env:RUN_DATE.json"
-
-python scripts/run_engine.py `
-  --date $env:RUN_DATE `
-  --mode live `
-  --market-mode auto `
-  --screener-csv $SCREENER `
-  --skip-quality-gate
-```
-
-For strict production-quality runs with a separate curated fundamentals file, prepare the universe with that file and run without `--skip-quality-gate`:
-
-```powershell
-$FULL_FUND = "data/raw/fundamentals/screener/full_fundamentals_$env:RUN_DATE.csv"
-
-python scripts/prepare_universe.py `
-  --date $env:RUN_DATE `
-  --universe-csv $UNIVERSE `
-  --fundamentals-csv $FULL_FUND `
-  --output-csv $SCREENER `
-  --report-json "data/processed/universe/universe_prep_$env:RUN_DATE.json" `
-  --force
-
-python scripts/enrich_fundamentals.py `
-  --input $SCREENER `
-  --output $SCREENER `
-  --report "data/processed/enrichment_report_$env:RUN_DATE.json"
-
-python scripts/run_engine.py `
-  --date $env:RUN_DATE `
-  --mode live `
-  --market-mode auto `
-  --screener-csv $SCREENER
-```
-
-### 7. View results
-
-```powershell
-Get-Content "runs/$env:RUN_DATE/buy_candidates.csv"
-streamlit run app.py
-```
-
----
-
-## Supplemental Data (optional, before daily-run)
-
+After changing config, always run:
 ```bash
-make fetch-delivery RUN_DATE=$RUN_DATE DELIVERY_SESSIONS=60    # NSE delivery volume
-make fetch-indices RUN_DATE=$RUN_DATE INDEX_SESSIONS=260        # Nifty index data
-make fetch-shareholding RUN_DATE=$RUN_DATE                      # BSE shareholding/pledge
+make check-config
+make test
 ```
 
-Note: BSE/NSE block datacenter IPs — run these locally, not in CI.
-
-## Daily Run Behavior
-
-`make daily-run` performs the following:
-
-1. runs a freshness check
-2. fetches the NSE universe
-3. scrapes fundamentals from screener.in
-4. enriches the resulting CSV
-5. runs the engine
-6. generates post-run explainers
-
-### Mode selection
-
-- Debug mode:
-  used when the run is based on the scraper-built `SCREENER_CSV`
-  skips the strict production quality gate by calling `make run-debug`
-
-- Production mode:
-  used only when you explicitly provide a separate `FUNDAMENTALS_CSV`
-  calls `make run` and enforces the quality gate
-
-### Why this matters
-
-Scraper-built data is often good enough for research and dashboard review, but it may still be incomplete for:
-
-- valuation coverage
-- classification coverage
-- some profitability and growth enrichments
-
-If production mode is triggered on scraper-only data, the run may fail with:
-
-- `INPUT QUALITY GATE FAILED`
-- low rankable coverage
-- unsupported template coverage
-
-That is expected behavior for production mode and does not necessarily mean the code is broken.
-
-### If `daily-run` fails with `INPUT QUALITY GATE FAILED`
-
-Use one of these approaches:
-
-- For normal local research:
-  run `make daily-run RUN_DATE=$RUN_DATE` and let it use debug mode on scraper-built data.
-
-- For strict production-quality runs:
-  provide a separate curated fundamentals file:
-
-```bash
-make daily-run RUN_DATE=$RUN_DATE FUNDAMENTALS_CSV=data/raw/fundamentals/screener/full_fundamentals_$RUN_DATE.csv
-```
-
-- For one-off debugging:
-
-```bash
-make run-debug RUN_DATE=$RUN_DATE SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$RUN_DATE.csv
-```
-
-## Post-Run Analysis (optional)
-
-```bash
-make momentum-scoring RUN_DATE=$RUN_DATE
-make earnings-surprise RUN_DATE=$RUN_DATE
-make forward-pe-peg RUN_DATE=$RUN_DATE
-make stock-explainer RUN_DATE=$RUN_DATE
-make backtest RUN_DATE=$RUN_DATE
-```
-
-## Dashboard Usage
-
-The dashboard reads run artifacts from `runs/<YYYY-MM-DD>/` and lets you inspect:
-
-- overview charts and recommendation mix
-- leaderboard and filters
-- per-stock detail with card scores and thesis
-- sector analysis
-- value-hunter view
-- run-quality diagnostics
-
-### Start the dashboard
-
-macOS / Linux:
-
-```bash
-make dashboard
-```
-
-or
-
-```bash
-source .venv/bin/activate
-streamlit run app.py
-```
-
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-streamlit run app.py
-```
-
-Then open the local URL printed by Streamlit, usually:
-
-```text
-http://localhost:8501
-```
-
-### Important: do not run `python app.py`
-
-This is a Streamlit app, not a plain Python CLI script. If you run:
-
-```bash
-python app.py
-```
-
-or
-
-```bash
-.venv/bin/python app.py
-```
-
-you may see warnings such as:
-
-- `missing ScriptRunContext`
-- `bare mode`
-
-That usually means the app was launched with the wrong command.
-
-### Typical dashboard workflow
-
-1. Run the pipeline first.
-
-```bash
-make daily-run RUN_DATE=$RUN_DATE
-```
-
-   Windows PowerShell users should use the Windows sequence from the Quick Start section instead of `make daily-run`.
-
-2. Start the dashboard.
-
-```bash
-make dashboard
-```
-
-3. In the sidebar, select the run date you want to inspect.
-
-4. Use filters for minimum score, gate-passed stocks, and recommendation type.
-
-### Troubleshooting
-
-- `No engine runs found`
-  Run `make daily-run RUN_DATE=$RUN_DATE` first so the app has data to load.
-
-- `missing ScriptRunContext`
-  Start the app with `make dashboard` or `streamlit run app.py`, not `python app.py`.
-
-- `Address already in use` or port `8501` busy
-  Start Streamlit on another port:
-
-```bash
-source .venv/bin/activate
-streamlit run app.py --server.port 8502
-```
-
-  Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-streamlit run app.py --server.port 8502
-```
-
-- Dashboard opens but latest run has empty scores
-  Check `runs/<date>/template_support.json` and `runs/<date>/input_quality.json`. This usually means the run completed with unsupported or incomplete fundamentals data rather than a dashboard bug.
-
-## All Make Targets
-
-| Target | Purpose |
-|--------|---------|
-| `make init` | First-time setup |
-| `make fetch-universe` | Fetch NSE bhavcopy universe |
-| `make fetch-screener-data` | Scrape fundamentals from screener.in |
-| `make fetch-price-history` | Backfill bhavcopy price history |
-| `make daily-run` | Full pipeline end-to-end |
-| `make run` | Engine run with explicit CSV path |
-| `make run-debug` | Engine run, skips quality gate |
-| `make enrich-fundamentals` | Compute missing metrics |
-| `make fetch-delivery` | NSE delivery volume data |
-| `make fetch-indices` | Nifty index EOD data |
-| `make fetch-shareholding` | BSE shareholding/pledge |
-| `make momentum-scoring` | Dual momentum overlays |
-| `make institutional-tracking` | MF/FII holding changes |
-| `make earnings-surprise` | Earnings surprise detection |
-| `make forward-pe-peg` | Forward PE, PEG, GARP score |
-| `make stock-explainer` | Per-stock investment theses |
-| `make backtest` | Validate past recommendations |
-| `make telegram-alerts` | Send picks via Telegram |
-| `make dashboard` | Launch Streamlit dashboard |
-| `make check-config` | Validate config before a run |
-| `make data-freshness` | Data staleness report |
-| `make check` | Syntax check |
-| `make test` | Unit tests |
-
-## Outputs (`runs/<YYYY-MM-DD>/`)
-
-| File | Contents |
-|------|---------|
-| `leaderboard.csv` | All stocks ranked by selection score |
-| `action_sheet.csv` | Rec + confidence + staged entry + gate notes |
-| `buy_candidates.csv` | Investable buy list |
-| `undervalued_high_potential.csv` | Discount-first shortlist |
-| `sector_summary.csv` | Sector breadth, buy-candidate density |
-| `portfolio_plan.csv` | Picks under sector/name caps |
-| `stock_<TICKER>.json` | Full per-stock detail |
-| `bias_audit.json` | Snooping/config integrity checks |
-| `coverage_snapshot.json` | Data completeness diagnostics |
-
-## Configuration
-
-`engine/config.py` — all scoring thresholds, portfolio controls, market-mode settings. Heavily commented; start here when onboarding.
-
-## Telegram Alerts
-
-```bash
-export TELEGRAM_BOT_TOKEN="..."
-export TELEGRAM_CHAT_ID="..."
-make telegram-alerts RUN_DATE=$RUN_DATE DRY_RUN=true   # dry run
-make telegram-alerts RUN_DATE=$RUN_DATE                 # live
-```
-
-## Scheduling (macOS, one-time)
-
-```bash
-python scripts/setup_scheduler.py --install    # Mon-Fri at 19:00
-python scripts/setup_scheduler.py --status
-python scripts/setup_scheduler.py --uninstall
-```
-
-## CI/CD
-
-| Workflow | Trigger | What it does |
-|----------|---------|-------------|
-| CI | Push/PR to main | Syntax check, config validation, unit tests |
-| Daily Run | Mon-Fri 19:15 IST | Fetch universe, run engine (debug), upload artifacts |
-| Weekly Backtest | Sunday | Backtester, upload reports |
-
-Secrets for Telegram alerts in CI: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
-
-## Repo Layout
-
-```
-engine/    # Scoring engine, models, cards, aggregation, advanced overlays
-scripts/   # Data pipeline, scraping, enrichment, reporting
-app.py     # Streamlit dashboard
-tests/     # Unit tests
-docs/      # Data dictionary and CSV templates
-data/      # Raw + processed datasets (local, gitignored)
-runs/      # Run artifacts per date (gitignored)
-logs/      # Cross-run history
-```
-
-## Notes
-
-- Research engine only — does not execute trades.
-- Data files, run outputs, and logs are gitignored; only code is versioned.
+## Interpretation Rules
+
+Use `research_status`, not only `recommendation`:
+- `Actionable`: passed recommendation, gate, template, and data-quality requirements.
+- `Research Candidate`: interesting but needs analyst review or more confirmation.
+- `Rejected`: does not meet current filters.
+- `Unsupported`: template/data coverage is insufficient; do not rely on the score.
+
+Use `recommendation` conservatively:
+- `Buy Candidate`: passes score, valuation, data-quality, red-flag, peer, and critical-risk gates.
+- `Watchlist`: worth research, but not cleared for immediate action.
+- `Insufficient Data`: score is not reliable enough for decision-making.
+- `Avoid`: rejected by current valuation, potential, risk, value-trap, or quality filters.
+- `Unsupported`: template coverage is incomplete.
+
+Use `data_quality_status` before trusting a row:
+- `Actionable Data`: sufficient source quality for shortlist use.
+- `Research Only Data`: usable for review, not for direct action.
+- `Weak Data`: should not drive decisions.
+
+## Pending Tasks
+
+Next implementation phases:
+- Fetch/merge pledge and promoter holding data so Buy Candidate gates can clear when risk evidence is present.
+- Fetch/merge governance and corporate-announcement red flags instead of leaving governance risk unknown.
+- Fetch/merge bank/NBFC asset-quality fields: GNPA, NNPA, PCR, CAR, NIM, credit cost, and ALM.
+- Fetch cached NSE index data through `make fetch-indices RUN_DATE=$RUN_DATE` so market mode uses benchmark/breadth evidence instead of only stock-level fallback.
+- Build enough historical runs and run `make backtest RUN_DATE=...` to create a usable `data/processed/model_calibration.json`.
+- Expand sub-sector valuation models for insurance, capital markets, real estate, cyclicals, IT, pharma, FMCG, and commodities.
+- Add richer analyst workbench views for red-flag timeline, valuation explanation, and config validation UI.
+
+## Action Items for User
+
+- Confirm which public sources are acceptable besides NSE, BSE, Screener public pages, and Yahoo-style public endpoints.
+- Before trusting Buy Candidate output, run/share the public-source fetches for pledge/shareholding, ASM/GSM, governance events, financial asset quality, and index data.
+- Treat the latest zero-buy result as a safety result, not a failure: the engine found Watchlist ideas but blocked buys because critical risk evidence is incomplete.
+- Decide whether full daily scraping should run locally only or also through a scheduler.
+- Review `daily_market_list.csv` manually before any investment action; this is an internal research tool, not financial advice.
+- Do not use `run-debug` for investment decisions; it exists only for sparse-data troubleshooting.

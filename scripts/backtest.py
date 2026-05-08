@@ -48,9 +48,18 @@ def load_recommendations(run_dir: Path) -> List[dict]:
                     break
             if ticker_col:
                 for _, row in df.iterrows():
+                    recommendation = str(row.get("recommendation", "Buy Candidate")).strip()
+                    research_status = str(row.get("research_status", "")).strip()
+                    if recommendation not in {"Buy Candidate", "Buy"}:
+                        continue
+                    if research_status and research_status not in {"Actionable", "Research Candidate"}:
+                        continue
                     recs.append({
                         "ticker": str(row[ticker_col]).strip().upper(),
                         "score": float(row.get("selection_score", row.get("score", 0))) if "selection_score" in row or "score" in row else 0,
+                        "recommendation": recommendation,
+                        "research_status": research_status,
+                        "sector": str(row.get("sector", "")).strip(),
                     })
                 return recs
         except Exception:
@@ -60,10 +69,13 @@ def load_recommendations(run_dir: Path) -> List[dict]:
     for sf in sorted(run_dir.glob("stock_*.json")):
         try:
             data = json.loads(sf.read_text())
-            if data.get("recommendation") == "Buy":
+            if data.get("recommendation") in {"Buy", "Buy Candidate"}:
                 recs.append({
                     "ticker": data.get("ticker", ""),
                     "score": data.get("selection_score") or data.get("final_opportunity_score") or 0,
+                    "recommendation": data.get("recommendation"),
+                    "research_status": data.get("research_status", ""),
+                    "sector": (data.get("classification") or {}).get("sector", ""),
                 })
         except (json.JSONDecodeError, IOError):
             continue
@@ -118,6 +130,7 @@ def compute_forward_returns(
         result = {
             "ticker": ticker,
             "score": rec["score"],
+            "sector": rec.get("sector", ""),
             "entry_price": entry_price,
             "entry_date": rec_date.isoformat(),
         }
@@ -171,6 +184,87 @@ def compute_backtest_stats(
     }
 
 
+def calibration_notes(stats: dict) -> list[str]:
+    """Generate simple calibration actions from realized performance."""
+    notes: list[str] = []
+    hit_rate = stats.get("hit_rate")
+    mean_return = stats.get("mean_return")
+    sharpe_like = stats.get("sharpe_like")
+    if hit_rate is not None and hit_rate < 50:
+        notes.append("Raise buy thresholds or tighten red-flag/data-quality gates; hit rate is below 50%.")
+    if mean_return is not None and mean_return < 0:
+        notes.append("Reduce valuation-gap optimism or add stricter entry timing; mean return is negative.")
+    if sharpe_like is not None and sharpe_like < 0.25:
+        notes.append("Improve risk/reward filter; realized return per unit volatility is weak.")
+    if not notes:
+        notes.append("No immediate threshold change indicated by this period.")
+    return notes
+
+
+def build_calibration_profile(results: List[dict], period: str = "3M") -> dict:
+    """Build a conservative calibration profile from realized backtest returns."""
+    ret_key = f"return_{period}"
+    realized: list[float] = []
+    sector_returns: dict[str, list[float]] = defaultdict(list)
+    for result in results:
+        for row in result.get("returns", []):
+            value = row.get(ret_key)
+            if value is None:
+                continue
+            realized.append(float(value))
+            sector = str(row.get("sector", "") or "").strip().lower()
+            if sector:
+                sector_returns[sector].append(float(value))
+
+    if not realized:
+        return {
+            "status": "Not Calibrated",
+            "period": period,
+            "sample_size": 0,
+            "global_multiplier": 1.0,
+            "sector_multipliers": {},
+            "notes": ["no realized returns available"],
+        }
+
+    arr = np.array(realized, dtype=float)
+    hit_rate = float(np.mean(arr > 0) * 100.0)
+    mean_return = float(np.mean(arr))
+    multiplier = 1.0
+    notes: list[str] = []
+    if hit_rate < 50.0:
+        multiplier -= 0.10
+        notes.append("global hit rate below 50%; haircut expected upside")
+    if mean_return < 0.0:
+        multiplier -= 0.10
+        notes.append("global mean return below zero; haircut expected upside")
+    if hit_rate >= 65.0 and mean_return >= 5.0:
+        multiplier += 0.05
+        notes.append("historical outcomes support a small upside confidence lift")
+
+    sector_multipliers = {}
+    for sector, values in sector_returns.items():
+        if len(values) < 5:
+            continue
+        sector_arr = np.array(values, dtype=float)
+        sector_hit = float(np.mean(sector_arr > 0) * 100.0)
+        sector_mean = float(np.mean(sector_arr))
+        if sector_hit < 45.0 or sector_mean < -2.0:
+            sector_multipliers[sector] = 0.90
+        elif sector_hit >= 65.0 and sector_mean > 5.0:
+            sector_multipliers[sector] = 1.05
+
+    return {
+        "status": "Calibrated" if len(realized) >= 10 else "Calibration Sample Too Small",
+        "period": period,
+        "sample_size": len(realized),
+        "hit_rate_pct": round(hit_rate, 2),
+        "mean_return_pct": round(mean_return, 2),
+        "global_multiplier": round(float(np.clip(multiplier, 0.70, 1.10)), 2),
+        "sector_multipliers": sector_multipliers,
+        "notes": notes or ["no conservative adjustment required"],
+    }
+
+
 def run_single_backtest(
     run_dir: Path,
     price_history: Dict[str, pd.DataFrame],
@@ -199,6 +293,8 @@ def run_single_backtest(
 
     for period in ["1M", "3M", "6M", "1Y"]:
         stats = compute_backtest_stats(returns, period)
+        if stats.get("n_stocks", 0) > 0:
+            stats["calibration_notes"] = calibration_notes(stats)
         result[f"stats_{period}"] = stats
 
     return result
@@ -235,6 +331,9 @@ def save_backtest_report(results: List[dict], output_path: Path) -> None:
                         "best": stats.get("best_return"),
                         "worst": stats.get("worst_return"),
                     })
+
+    calibration_path = output_path.parent / "model_calibration.json"
+    calibration_path.write_text(json.dumps(build_calibration_profile(results), indent=2, default=str))
 
     return json_path, csv_path
 

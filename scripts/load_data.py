@@ -1,7 +1,7 @@
 import csv
 import re
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -10,10 +10,12 @@ import pandas as pd
 sys.path.insert(0, ".")
 
 from engine import RawStockData, NSEClassification
+from engine.models import MetricProvenance
 from engine.config import (
     CARD_WEIGHTS,
     CARD_DATA_THRESHOLD,
     ENABLE_RAW_PRICE_METRICS,
+    MIN_FINANCIAL_ASSET_QUALITY_FIELDS,
     PRICE_HISTORY_LOOKBACK_SESSIONS,
     RAW_PRICE_METRIC_FALLBACK_TO_CSV,
     infer_template_code,
@@ -23,10 +25,11 @@ from engine.metric_definitions import (
     compute_asm_gsm_risk,
     compute_default_distress,
     compute_fair_pb,
+    compute_fair_pb_financial_adjusted,
     compute_fair_value_gap,
     compute_forward_view,
     compute_gnpa_nnpa_stress,
-    compute_iv_general,
+    compute_iv_general_sector_adjusted,
     compute_iv_gap,
     compute_liquidity_risk,
     compute_car_stress,
@@ -170,6 +173,9 @@ CLASSIFICATION_ALIASES = {
     "industry": ["Industry"],
     "basic_industry": ["Basic Industry", "BasicIndustry"],
 }
+CLASSIFICATION_SOURCE_ALIASES = ["Classification Source", "ClassificationSource"]
+CLASSIFICATION_CONFIDENCE_ALIASES = ["Classification Confidence", "ClassificationConfidence"]
+FUNDAMENTALS_SOURCE_ALIASES = ["Fundamentals Source", "FundamentalsSource"]
 
 TICKER_ALIASES = ["NSE Symbol", "Symbol", "Ticker"]
 NAME_ALIASES = ["Name", "Company Name"]
@@ -226,7 +232,7 @@ def _is_fund_like_security(name: str) -> bool:
     return bool(FUND_LIKE_NAME_PATTERN.search(str(name or "").strip()))
 
 
-def _first_present(row: pd.Series, aliases: Iterable[str]) -> Optional[object]:
+def _first_present_with_field(row: pd.Series, aliases: Iterable[str]) -> tuple[Optional[object], str]:
     normalized = {_norm(c): c for c in row.index}
     for alias in aliases:
         for candidate in (alias, f"fund__{alias}"):
@@ -238,8 +244,13 @@ def _first_present(row: pd.Series, aliases: Iterable[str]) -> Optional[object]:
                 continue
             if isinstance(value, str) and not value.strip():
                 continue
-            return value
-    return None
+            return value, key
+    return None, ""
+
+
+def _first_present(row: pd.Series, aliases: Iterable[str]) -> Optional[object]:
+    value, _ = _first_present_with_field(row, aliases)
+    return value
 
 
 def _as_float(value: object) -> Optional[float]:
@@ -277,6 +288,18 @@ def _as_events(value: object) -> list[str]:
     return [i.strip() for i in items if i.strip()]
 
 
+def _has_value(value: object) -> bool:
+    """Return True when a parsed raw value is meaningfully present."""
+    if value is None or value == "" or value == []:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        return True
+    return True
+
+
 def _get_text(row: pd.Series, aliases: Iterable[str], default: str) -> str:
     value = _first_present(row, aliases)
     if value is None:
@@ -285,10 +308,10 @@ def _get_text(row: pd.Series, aliases: Iterable[str], default: str) -> str:
     return text if text else default
 
 
-def _build_raw_inputs(row: pd.Series) -> dict:
+def _build_raw_inputs(row: pd.Series, provenance: Optional[dict[str, MetricProvenance]] = None) -> dict:
     raw = {}
     for key, aliases in RAW_ALIASES.items():
-        value = _first_present(row, aliases)
+        value, field = _first_present_with_field(row, aliases)
         if key in {"is_t2t"}:
             raw[key] = _as_bool(value)
         elif key in {"governance_events"}:
@@ -298,6 +321,14 @@ def _build_raw_inputs(row: pd.Series) -> dict:
             raw[key] = int(numeric) if numeric is not None else 0
         else:
             raw[key] = _as_float(value)
+        raw_value = raw.get(key)
+        if provenance is not None and field and _has_value(raw_value):
+            provenance[key] = MetricProvenance(
+                source="screener_csv",
+                source_field=field,
+                confidence="Medium",
+                method="raw_input",
+            )
     return raw
 
 
@@ -305,19 +336,75 @@ def _init_fundamentals() -> dict:
     return {metric: None for metric in METRIC_KEYS}
 
 
-def _fill_direct_metrics(row: pd.Series, fundamentals: dict) -> None:
+def _fill_direct_metrics(
+    row: pd.Series,
+    fundamentals: dict,
+    provenance: Optional[dict[str, MetricProvenance]] = None,
+    source: str = "screener_csv",
+) -> None:
     for metric, aliases in DIRECT_ALIASES.items():
         if metric not in fundamentals:
             continue
-        value = _as_float(_first_present(row, aliases))
+        raw_value, field = _first_present_with_field(row, aliases)
+        value = _as_float(raw_value)
         if value is not None:
             fundamentals[metric] = value
+            if provenance is not None:
+                provenance[metric] = MetricProvenance(
+                    source=source,
+                    source_field=field,
+                    confidence="Medium",
+                    method="direct",
+                )
+
+
+def _apply_csv_fallback_provenance(
+    fundamentals: dict,
+    provenance: dict[str, MetricProvenance],
+) -> None:
+    """Mark price metrics that survived from CSV fallback instead of raw history."""
+    for metric in RAW_PRICE_METRICS:
+        if fundamentals.get(metric) is None:
+            continue
+        current = provenance.get(metric)
+        if current is not None and current.source == "bhavcopy_local":
+            continue
+        provenance[metric] = MetricProvenance(
+            source="screener_csv",
+            source_field=current.source_field if current else "",
+            confidence="Low",
+            method="csv_price_fallback",
+        )
+
+
+def metric_provenance_rows(universe: Dict[str, RawStockData]) -> list[dict]:
+    """Flatten field-level provenance for CSV diagnostics."""
+    rows: list[dict] = []
+    for ticker, stock in sorted(universe.items()):
+        for metric, item in sorted(stock.metric_provenance.items()):
+            value = stock.fundamentals.get(metric)
+            if value is None:
+                continue
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "metric": metric,
+                    "value": value,
+                    "source": item.source,
+                    "source_field": item.source_field,
+                    "confidence": item.confidence,
+                    "freshness": item.freshness,
+                    "method": item.method,
+                }
+            )
+    return rows
 
 
 def _apply_price_history_metrics(
     fundamentals: dict,
     raw: dict,
     price_history: Optional[pd.DataFrame],
+    provenance: Optional[dict[str, MetricProvenance]] = None,
 ) -> None:
     computed = compute_price_metrics_from_history(price_history)
     if not computed:
@@ -329,8 +416,22 @@ def _apply_price_history_metrics(
         if value is None:
             continue
         fundamentals[metric] = value
+        if provenance is not None:
+            provenance[metric] = MetricProvenance(
+                source="bhavcopy_local",
+                source_field="price_history",
+                confidence="High",
+                method="computed_from_price_history",
+            )
         if metric == "close_price":
             raw["close_price"] = value
+            if provenance is not None:
+                provenance["close_price"] = MetricProvenance(
+                    source="bhavcopy_local",
+                    source_field="close",
+                    confidence="High",
+                    method="computed_from_price_history",
+                )
         if metric == "avg_daily_turnover_cr":
             raw["avg_daily_turnover_cr"] = value
     if not RAW_PRICE_METRIC_FALLBACK_TO_CSV:
@@ -338,27 +439,103 @@ def _apply_price_history_metrics(
             fundamentals[metric] = None
 
 
-def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> tuple[bool, bool]:
+def _set_derived(
+    fundamentals: dict,
+    metric: str,
+    value: Optional[float],
+    provenance: Optional[dict[str, MetricProvenance]],
+    method: str,
+) -> None:
+    """Set a derived metric and record calculation provenance."""
+    if value is None:
+        return
+    fundamentals[metric] = value
+    if provenance is not None:
+        provenance[metric] = MetricProvenance(
+            source="engine_derived",
+            source_field="calculated",
+            confidence="Medium",
+            method=method,
+        )
+
+
+def _apply_provenance_freshness(
+    provenance: dict[str, MetricProvenance],
+    *,
+    csv_path: Path,
+    price_history: Optional[pd.DataFrame],
+    run_date: Optional[date],
+) -> None:
+    """Attach best-known freshness dates to metric provenance records."""
+    csv_freshness = datetime.fromtimestamp(csv_path.stat().st_mtime).date().isoformat() if csv_path.exists() else ""
+    run_freshness = run_date.isoformat() if run_date else csv_freshness
+    price_freshness = ""
+    if price_history is not None and not price_history.empty and "date" in price_history.columns:
+        try:
+            price_freshness = pd.to_datetime(price_history["date"]).max().date().isoformat()
+        except Exception:
+            price_freshness = run_freshness
+
+    for item in provenance.values():
+        if item.freshness:
+            continue
+        if item.source == "bhavcopy_local":
+            item.freshness = price_freshness or run_freshness
+        elif item.source == "engine_derived":
+            item.freshness = run_freshness
+        else:
+            item.freshness = csv_freshness
+
+
+def _fill_derived_metrics(
+    fundamentals: dict,
+    raw: dict,
+    template_hint: str,
+    provenance: Optional[dict[str, MetricProvenance]] = None,
+) -> tuple[bool, bool]:
     close_price = raw.get("close_price")
     pledge_pct = raw.get("pledge_pct")
     if pledge_pct is not None:
-        fundamentals["promoter_pledge"] = compute_promoter_pledge_risk(pledge_pct)
+        _set_derived(
+            fundamentals,
+            "promoter_pledge",
+            compute_promoter_pledge_risk(pledge_pct),
+            provenance,
+            "promoter_pledge_risk",
+        )
 
     intrinsic_value = None
     if template_hint == "A":
-        intrinsic_value = compute_iv_general(
+        intrinsic_value = compute_iv_general_sector_adjusted(
+            sector=raw.get("_sector", ""),
+            basic_industry=raw.get("_basic_industry", ""),
             eps_fy0=raw.get("eps_fy0"),
             eps_fy1=raw.get("eps_fy1"),
             eps_fy2=raw.get("eps_fy2"),
             eps_ttm=raw.get("eps_ttm"),
             bvps=raw.get("book_value_per_share"),
+            roe_ttm=raw.get("roe_ttm"),
+            roce_3y=fundamentals.get("roce_3y_median"),
+            growth_yoy=fundamentals.get("eps_growth_yoy") or fundamentals.get("rev_growth_yoy"),
         )
     if intrinsic_value is None:
         intrinsic_value = raw.get("intrinsic_value")
     if fundamentals.get("iv_gap") is None and close_price is not None and intrinsic_value is not None:
-        fundamentals["iv_gap"] = compute_iv_gap(close_price, intrinsic_value)
+        _set_derived(
+            fundamentals,
+            "iv_gap",
+            compute_iv_gap(close_price, intrinsic_value),
+            provenance,
+            "intrinsic_value_gap",
+        )
     if fundamentals.get("discount_to_iv") is None and fundamentals.get("iv_gap") is not None:
-        fundamentals["discount_to_iv"] = fundamentals["iv_gap"]
+        _set_derived(
+            fundamentals,
+            "discount_to_iv",
+            fundamentals["iv_gap"],
+            provenance,
+            "intrinsic_value_gap",
+        )
 
     if fundamentals.get("forward_view") is None:
         eps_forward_growth = None
@@ -374,73 +551,92 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
             rev_forward_growth = fundamentals.get("eps_growth_yoy")
         forward_view = compute_forward_view(eps_forward_growth, rev_forward_growth)
         if forward_view is not None:
-            fundamentals["forward_view"] = round(forward_view, 2)
+            _set_derived(fundamentals, "forward_view", round(forward_view, 2), provenance, "forward_view")
 
     roe_ttm = raw.get("roe_ttm")
     pb_now = fundamentals.get("pb_percentile")
     if pb_now is not None and roe_ttm is not None and roe_ttm > 0:
         if fundamentals.get("roe_adj_pb") is None:
-            fundamentals["roe_adj_pb"] = pb_now / roe_ttm
+            _set_derived(fundamentals, "roe_adj_pb", pb_now / roe_ttm, provenance, "roe_adjusted_pb")
     if template_hint in {"B", "C"} and pb_now is not None and roe_ttm is not None and roe_ttm > 0:
         coe = LOCKED_COE_NBFC if template_hint == "C" else LOCKED_COE_BANK
-        fair_pb = compute_fair_pb(roe_ttm, coe=coe)
-        fair_gap = compute_fair_value_gap(pb_now, fair_pb)
-        if fundamentals.get("fair_value_gap") is None:
-            fundamentals["fair_value_gap"] = fair_gap
-        if fundamentals.get("discount_to_fair_pb") is None:
-            fundamentals["discount_to_fair_pb"] = fair_gap
+        aq_values = [
+            raw.get("gnpa_pct"),
+            raw.get("nnpa_pct"),
+            raw.get("pcr_pct"),
+            raw.get("car_pct"),
+            fundamentals.get("nim"),
+            fundamentals.get("credit_cost_discipline"),
+        ]
+        if sum(1 for value in aq_values if value is not None) >= MIN_FINANCIAL_ASSET_QUALITY_FIELDS:
+            fair_pb = compute_fair_pb_financial_adjusted(
+                roe_ttm=roe_ttm,
+                coe=coe,
+                gnpa_pct=raw.get("gnpa_pct"),
+                nnpa_pct=raw.get("nnpa_pct"),
+                pcr_pct=raw.get("pcr_pct"),
+                car_pct=raw.get("car_pct"),
+                nim_pct=fundamentals.get("nim"),
+                credit_cost_pct=fundamentals.get("credit_cost_discipline"),
+            )
+            fair_gap = compute_fair_value_gap(pb_now, fair_pb)
+            if fundamentals.get("fair_value_gap") is None:
+                _set_derived(fundamentals, "fair_value_gap", fair_gap, provenance, "fair_pb_gap")
+            if fundamentals.get("discount_to_fair_pb") is None:
+                _set_derived(fundamentals, "discount_to_fair_pb", fair_gap, provenance, "fair_pb_gap")
 
+    debt_for_distress = None if template_hint in {"B", "C"} else raw.get("debt_to_equity")
     distress_risk, _ = compute_default_distress(
-        debt_to_equity=raw.get("debt_to_equity"),
+        debt_to_equity=debt_for_distress,
         interest_coverage_ttm=raw.get("interest_coverage"),
         credit_rating_grade=int(raw["credit_rating_grade"]) if raw.get("credit_rating_grade") is not None else None,
     )
     if fundamentals.get("default_distress") is None:
-        fundamentals["default_distress"] = distress_risk
+        _set_derived(fundamentals, "default_distress", distress_risk, provenance, "default_distress_risk")
 
     asm_risk, _ = compute_asm_gsm_risk(raw.get("asm_stage", 0), raw.get("gsm_stage", 0))
     if fundamentals.get("asm_gsm_risk") is None:
-        fundamentals["asm_gsm_risk"] = asm_risk
+        _set_derived(fundamentals, "asm_gsm_risk", asm_risk, provenance, "asm_gsm_risk")
 
     gnpa_risk, _ = compute_gnpa_nnpa_stress(raw.get("gnpa_pct"), raw.get("nnpa_pct"))
     if fundamentals.get("gnpa_nnpa_stress") is None:
-        fundamentals["gnpa_nnpa_stress"] = gnpa_risk
+        _set_derived(fundamentals, "gnpa_nnpa_stress", gnpa_risk, provenance, "gnpa_nnpa_stress")
 
     car_risk, _ = compute_car_stress(raw.get("car_pct"))
     if fundamentals.get("capital_adequacy_stress") is None:
-        fundamentals["capital_adequacy_stress"] = car_risk
+        _set_derived(fundamentals, "capital_adequacy_stress", car_risk, provenance, "capital_adequacy_stress")
 
     pcr_risk, _ = compute_pcr_weakness(raw.get("pcr_pct"))
     if fundamentals.get("pcr_weakness") is None:
-        fundamentals["pcr_weakness"] = pcr_risk
+        _set_derived(fundamentals, "pcr_weakness", pcr_risk, provenance, "pcr_weakness")
 
     alm_risk, _ = compute_alm_mismatch(raw.get("alm_st_pct"))
     if fundamentals.get("alm_mismatch") is None:
-        fundamentals["alm_mismatch"] = alm_risk
+        _set_derived(fundamentals, "alm_mismatch", alm_risk, provenance, "alm_mismatch")
 
     liq_risk, _ = compute_liquidity_risk(
         avg_daily_turnover_cr=raw.get("avg_daily_turnover_cr"),
         is_t2t=raw.get("is_t2t", False),
     )
     if fundamentals.get("liquidity_manipulation") is None:
-        fundamentals["liquidity_manipulation"] = liq_risk
+        _set_derived(fundamentals, "liquidity_manipulation", liq_risk, provenance, "liquidity_risk")
 
     gov_risk, _ = compute_governance_risk(raw.get("governance_events", []))
     if fundamentals.get("governance_event") is None:
-        fundamentals["governance_event"] = gov_risk
+        _set_derived(fundamentals, "governance_event", gov_risk, provenance, "governance_risk")
     if fundamentals.get("governance_promoter") is None:
-        fundamentals["governance_promoter"] = gov_risk
+        _set_derived(fundamentals, "governance_promoter", gov_risk, provenance, "governance_risk")
     if fundamentals.get("surveillance_default") is None:
-        fundamentals["surveillance_default"] = max(asm_risk, distress_risk)
+        _set_derived(fundamentals, "surveillance_default", max(asm_risk, distress_risk), provenance, "surveillance_default")
 
     m_score = raw.get("beneish_m_score")
     if fundamentals.get("accounting_quality") is None and m_score is not None:
         acc_risk, _ = m_score_to_raw_risk(m_score)
-        fundamentals["accounting_quality"] = acc_risk
+        _set_derived(fundamentals, "accounting_quality", acc_risk, provenance, "beneish_m_score_risk")
 
     # ── Contrarian / Deep Value metrics ──────────────────────────────────────
     if fundamentals.get("piotroski_f_score") is None:
-        fundamentals["piotroski_f_score"] = compute_piotroski_f_score(
+        _set_derived(fundamentals, "piotroski_f_score", compute_piotroski_f_score(
             roa_fy0=fundamentals.get("roa"),
             cfo=raw.get("cfo_annual"),
             roa_fy1=raw.get("roa_fy1"),
@@ -453,38 +649,38 @@ def _fill_derived_metrics(fundamentals: dict, raw: dict, template_hint: str) -> 
             gross_margin_fy1=raw.get("opm_fy1"),
             asset_turnover_fy0=raw.get("asset_turnover"),
             asset_turnover_fy1=raw.get("asset_turnover_fy1"),
-        )
+        ), provenance, "piotroski_f_score")
 
     if fundamentals.get("earnings_yield") is None:
-        fundamentals["earnings_yield"] = compute_earnings_yield(
-            pe_ratio=fundamentals.get("pe_percentile"),
-        )
+        _set_derived(fundamentals, "earnings_yield", compute_earnings_yield(
+            pe_ratio=fundamentals.get("pe_percentile")
+        ), provenance, "earnings_yield")
 
     if fundamentals.get("dividend_yield_score") is None:
-        fundamentals["dividend_yield_score"] = compute_dividend_yield_score(
-            dividend_yield_pct=raw.get("dividend_yield"),
-        )
+        _set_derived(fundamentals, "dividend_yield_score", compute_dividend_yield_score(
+            dividend_yield_pct=raw.get("dividend_yield")
+        ), provenance, "dividend_yield_score")
 
     if fundamentals.get("promoter_buying") is None:
-        fundamentals["promoter_buying"] = compute_promoter_buying(
+        _set_derived(fundamentals, "promoter_buying", compute_promoter_buying(
             promoter_holding_pct=raw.get("promoter_holding_pct"),
             promoter_holding_prev_pct=raw.get("promoter_holding_prev"),
-        )
+        ), provenance, "promoter_buying")
 
     if fundamentals.get("operating_leverage_score") is None:
-        fundamentals["operating_leverage_score"] = compute_operating_leverage_score(
+        _set_derived(fundamentals, "operating_leverage_score", compute_operating_leverage_score(
             gross_block_fy0=raw.get("gross_block_fy0"),
             gross_block_fy3=raw.get("gross_block_fy3"),
             asset_turnover=raw.get("asset_turnover"),
-        )
+        ), provenance, "operating_leverage_score")
 
     if fundamentals.get("margin_expansion") is None:
-        fundamentals["margin_expansion"] = compute_margin_expansion(
+        _set_derived(fundamentals, "margin_expansion", compute_margin_expansion(
             opm_fy0=fundamentals.get("ebitda_margin"),
             opm_fy1=raw.get("opm_fy1"),
             opm_fy2=raw.get("opm_fy2"),
             rev_growth_yoy=fundamentals.get("rev_growth_yoy"),
-        )
+        ), provenance, "margin_expansion")
 
     on_asm = raw.get("asm_stage", 0) > 0
     on_gsm = raw.get("gsm_stage", 0) > 0
@@ -562,13 +758,44 @@ def load_from_screener(
             industry=industry,
             basic_industry=basic_industry,
         )
+        has_sector = bool(classification.sector and classification.sector != "Diversified")
+        has_industry = bool(classification.industry and classification.industry != "Diversified")
+        has_basic_industry = bool(basic_industry and basic_industry != "Diversified")
+
+        classification_source = _get_text(row, CLASSIFICATION_SOURCE_ALIASES, "")
+        classification_confidence = _get_text(row, CLASSIFICATION_CONFIDENCE_ALIASES, "")
+        if not classification_source:
+            if has_sector or has_industry or has_basic_industry:
+                classification_source = "screener_csv"
+            else:
+                classification_source = "unknown"
+        if not classification_confidence:
+            if has_sector and has_industry and has_basic_industry:
+                classification_confidence = "High"
+            elif has_sector or has_industry or has_basic_industry:
+                classification_confidence = "Medium"
+            else:
+                classification_confidence = "Low"
+        fundamentals_source = _get_text(row, FUNDAMENTALS_SOURCE_ALIASES, "screener_csv")
 
         fundamentals = _init_fundamentals()
-        _fill_direct_metrics(row, fundamentals)
-        raw = _build_raw_inputs(row)
+        metric_provenance: dict[str, MetricProvenance] = {}
+        _fill_direct_metrics(row, fundamentals, metric_provenance, source=fundamentals_source)
+        raw = _build_raw_inputs(row, metric_provenance)
+        raw["_sector"] = classification.sector
+        raw["_basic_industry"] = classification.basic_industry
         price_history = price_history_map.get(ticker)
+        price_source = "missing"
         if ENABLE_RAW_PRICE_METRICS:
-            _apply_price_history_metrics(fundamentals, raw, price_history)
+            _apply_price_history_metrics(fundamentals, raw, price_history, metric_provenance)
+            if price_history is not None and not price_history.empty:
+                price_source = "bhavcopy_local"
+            elif any(fundamentals.get(metric) is not None for metric in RAW_PRICE_METRICS):
+                price_source = "csv_fallback"
+                _apply_csv_fallback_provenance(fundamentals, metric_provenance)
+        elif any(fundamentals.get(metric) is not None for metric in RAW_PRICE_METRICS):
+            price_source = "csv_only"
+            _apply_csv_fallback_provenance(fundamentals, metric_provenance)
 
         # Persist raw disqualifier inputs for strict red-flag checks.
         fundamentals["gnpa_pct"] = raw.get("gnpa_pct")
@@ -579,7 +806,9 @@ def load_from_screener(
         fundamentals["alm_st_pct"] = raw.get("alm_st_pct")
         fundamentals["avg_daily_turnover_cr"] = raw.get("avg_daily_turnover_cr")
         fundamentals["interest_coverage"] = raw.get("interest_coverage")
+        fundamentals["debt_to_equity"] = raw.get("debt_to_equity")
         fundamentals["credit_rating_grade"] = raw.get("credit_rating_grade")
+        fundamentals["beneish_m_score"] = raw.get("beneish_m_score")
         fundamentals["governance_events"] = raw.get("governance_events")
         fundamentals["close_price"] = raw.get("close_price")
         fundamentals["asm_stage"] = raw.get("asm_stage")
@@ -589,6 +818,13 @@ def load_from_screener(
             fundamentals=fundamentals,
             raw=raw,
             template_hint=_template_hint(classification),
+            provenance=metric_provenance,
+        )
+        _apply_provenance_freshness(
+            metric_provenance,
+            csv_path=Path(csv_path),
+            price_history=price_history,
+            run_date=run_date,
         )
 
         universe[ticker] = RawStockData(
@@ -599,6 +835,11 @@ def load_from_screener(
             fundamentals=fundamentals,
             on_asm=on_asm,
             on_gsm=on_gsm,
+            metric_provenance=metric_provenance,
+            classification_source=classification_source,
+            classification_confidence=classification_confidence,
+            fundamentals_source=fundamentals_source,
+            price_source=price_source,
         )
     return universe
 

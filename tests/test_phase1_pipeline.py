@@ -1,15 +1,20 @@
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from engine import NSEClassification, RawStockData, Template
 from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS, infer_template_code, validate_runtime_config
-from engine.metric_definitions import compute_default_distress
+from engine.metric_definitions import (
+    compute_default_distress,
+    compute_fair_pb_financial_adjusted,
+    compute_iv_general_sector_adjusted,
+)
 from engine.scoring import score_metric
-from scripts.load_data import load_from_screener, metric_coverage, validate_loader_support
+from scripts.load_data import load_from_screener, metric_coverage, metric_provenance_rows, validate_loader_support
 from scripts.prepare_universe import _build_universe_frame, _finalize_output, _merge_fundamentals
 from scripts.run_engine import (
     apply_template_support_overrides,
@@ -37,6 +42,11 @@ class Phase1PipelineTests(unittest.TestCase):
     def test_runtime_config_validates(self) -> None:
         validate_runtime_config()
         validate_loader_support()
+
+    def test_runtime_config_rejects_invalid_peer_fallback(self) -> None:
+        with patch("engine.config.PEER_MIN_SECTOR", 1):
+            with self.assertRaisesRegex(ValueError, "PEER_MIN_SECTOR"):
+                validate_runtime_config()
 
     def test_build_universe_filters_non_eq(self) -> None:
         df = pd.DataFrame(
@@ -121,8 +131,8 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertEqual(stock.fundamentals["fcf_consistency"], 80.0)
             self.assertEqual(stock.fundamentals["growth_stability"], 72.0)
 
-    def test_score_metric_returns_neutral_when_no_peers(self) -> None:
-        self.assertEqual(score_metric(10.0, [], True), 50.0)
+    def test_score_metric_returns_none_when_no_peers(self) -> None:
+        self.assertIsNone(score_metric(10.0, [], True))
 
     def test_quality_gate_blocks_sparse_input(self) -> None:
         universe = {"AAA": _stock("AAA", fundamentals={})}
@@ -369,6 +379,109 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertNotEqual(stock.fundamentals["price_vs_50dma"], 999.0)
             self.assertIsNotNone(stock.price_history)
 
+    def test_load_from_screener_backfills_classification_metadata_for_legacy_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "legacy_screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "AAA",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["AAA"]
+            self.assertEqual(stock.classification_source, "screener_csv")
+            self.assertEqual(stock.classification_confidence, "High")
+
+    def test_load_from_screener_records_metric_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "AAA",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                        "P/E": "20",
+                        "Current Price": "100",
+                        "EPS FY0": "10",
+                        "EPS FY1": "12",
+                        "EPS FY2": "11",
+                        "Book Value Per Share": "40",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["AAA"]
+            self.assertEqual(stock.metric_provenance["pe_percentile"].source, "screener_csv")
+            self.assertEqual(stock.metric_provenance["iv_gap"].source, "engine_derived")
+            self.assertTrue(stock.metric_provenance["iv_gap"].freshness)
+            rows = metric_provenance_rows(universe)
+            self.assertTrue(any(row["metric"] == "iv_gap" for row in rows))
+
+    def test_sector_adjusted_iv_applies_quality_and_sector_adjustment(self) -> None:
+        it_iv = compute_iv_general_sector_adjusted(
+            sector="Information Technology",
+            basic_industry="IT - Services",
+            eps_fy0=10,
+            eps_fy1=9,
+            eps_fy2=8,
+            eps_ttm=10,
+            bvps=50,
+            roe_ttm=25,
+            roce_3y=28,
+            growth_yoy=20,
+        )
+        commodity_iv = compute_iv_general_sector_adjusted(
+            sector="Oil, Gas & Consumable Fuels",
+            basic_industry="Commodity",
+            eps_fy0=10,
+            eps_fy1=9,
+            eps_fy2=8,
+            eps_ttm=10,
+            bvps=50,
+            roe_ttm=8,
+            roce_3y=8,
+            growth_yoy=-5,
+        )
+        self.assertIsNotNone(it_iv)
+        self.assertIsNotNone(commodity_iv)
+        self.assertGreater(it_iv, commodity_iv)
+
+    def test_financial_fair_pb_penalizes_asset_quality_risk(self) -> None:
+        strong = compute_fair_pb_financial_adjusted(
+            roe_ttm=16,
+            coe=0.13,
+            gnpa_pct=1.5,
+            nnpa_pct=0.5,
+            pcr_pct=80,
+            car_pct=19,
+            nim_pct=4.2,
+            credit_cost_pct=0.7,
+        )
+        weak = compute_fair_pb_financial_adjusted(
+            roe_ttm=16,
+            coe=0.13,
+            gnpa_pct=9,
+            nnpa_pct=4,
+            pcr_pct=45,
+            car_pct=12,
+            nim_pct=2.0,
+            credit_cost_pct=3.0,
+        )
+        self.assertIsNotNone(strong)
+        self.assertIsNotNone(weak)
+        self.assertGreater(strong, weak)
+
     def test_default_distress_treats_unrated_as_conservative_not_default(self) -> None:
         risk, is_disq = compute_default_distress(
             debt_to_equity=1.2,
@@ -402,10 +515,40 @@ class Phase1PipelineTests(unittest.TestCase):
             ).to_csv(csv_path, index=False)
             universe = load_from_screener(str(csv_path), price_history_map={})
             stock = universe["AAA"]
-            self.assertAlmostEqual(stock.fundamentals["iv_gap"], -20.0, places=2)
-            self.assertAlmostEqual(stock.fundamentals["discount_to_iv"], -20.0, places=2)
+            self.assertAlmostEqual(stock.fundamentals["iv_gap"], -9.09, places=2)
+            self.assertAlmostEqual(stock.fundamentals["discount_to_iv"], -9.09, places=2)
 
     def test_load_from_screener_derives_bank_roe_adjusted_pb(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "BANK1",
+                        "Name": "BANK1",
+                        "Macro Sector": "Financial Services",
+                        "Sector": "Financial Services",
+                        "Industry": "Banking",
+                        "Basic Industry": "Private Sector Bank",
+                        "Current Price": "100",
+                        "Price to Book value": "2.0",
+                        "ROE": "16",
+                        "GNPA %": "1.4",
+                        "NNPA %": "0.5",
+                        "PCR %": "78",
+                        "CAR %": "18",
+                        "NIM": "4.1",
+                        "Credit Cost": "0.8",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["BANK1"]
+            self.assertAlmostEqual(stock.fundamentals["roe_adj_pb"], 0.125, places=6)
+            self.assertIsNotNone(stock.fundamentals["fair_value_gap"])
+            self.assertIsNotNone(stock.fundamentals["discount_to_fair_pb"])
+
+    def test_financial_fair_value_requires_asset_quality_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "screener.csv"
             pd.DataFrame(
@@ -425,9 +568,8 @@ class Phase1PipelineTests(unittest.TestCase):
             ).to_csv(csv_path, index=False)
             universe = load_from_screener(str(csv_path), price_history_map={})
             stock = universe["BANK1"]
-            self.assertAlmostEqual(stock.fundamentals["roe_adj_pb"], 0.125, places=6)
-            self.assertIsNotNone(stock.fundamentals["fair_value_gap"])
-            self.assertIsNotNone(stock.fundamentals["discount_to_fair_pb"])
+            self.assertIsNone(stock.fundamentals["fair_value_gap"])
+            self.assertIsNone(stock.fundamentals["discount_to_fair_pb"])
 
     def test_load_from_screener_derives_general_roe_adjusted_pb(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

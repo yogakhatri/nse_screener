@@ -33,7 +33,7 @@ SCRAPER_FORCE_REFRESH ?= false
 
 .DEFAULT_GOAL := help
 
-.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data prepare-csv enrich-fundamentals fetch-shareholding fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest backtest dashboard check check-config test clean clean-generated
+.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data build-classification source-registry prepare-csv enrich-fundamentals fetch-shareholding fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest backtest dashboard check check-config test clean clean-generated
 
 help:
 	@echo "NSE Screener Make Targets"
@@ -44,6 +44,8 @@ help:
 	@echo "  make fetch-universe RUN_DATE=...   Fetch universe + apply classification master (default allows partial classification)"
 	@echo "  make fetch-price-history RUN_DATE=... [SESSIONS=260]  Backfill bhavcopy history for raw price metrics"
 	@echo "  make fetch-screener-data RUN_DATE=... [SCRAPER_DELAY=1.5] [SCRAPER_LIMIT=50] [SCRAPER_WORKERS=1]  Auto-scrape fundamentals from screener.in"
+	@echo "  make build-classification RUN_DATE=... [SCREENER_CSV=...]  Refresh local classification master from scrape/cache"
+	@echo "  make source-registry RUN_DATE=... [SCREENER_CSV=...]  Write source_registry.json/csv"
 	@echo "  make prepare-csv RUN_DATE=...      Create dated Screener CSV from template if missing"
 	@echo "  make enrich-fundamentals RUN_DATE=... [SCRAPE=true] [SCRAPE_LIMIT=N]  Compute missing metrics"
 	@echo "  make fetch-shareholding RUN_DATE=... [SHP_LIMIT=N]  Fetch shareholding patterns from BSE"
@@ -135,6 +137,19 @@ fetch-screener-data: venv
 		--limit "$(SCRAPER_LIMIT)" \
 		--workers "$(SCRAPER_WORKERS)" \
 		$(if $(filter true,$(SCRAPER_FORCE_REFRESH)),--force-refresh,)
+
+build-classification: venv
+	@$(PYTHON) scripts/build_classification_master.py \
+		--output-csv "$(CLASSIFICATION_CSV)" \
+		--screener-csv "$(SCREENER_CSV)" \
+		--force
+
+source-registry: venv
+	@$(PYTHON) scripts/source_registry.py \
+		--date "$(RUN_DATE)" \
+		--screener-csv "$(SCREENER_CSV)" \
+		--output-json "runs/$(RUN_DATE)/source_registry.json" \
+		--output-csv "runs/$(RUN_DATE)/source_registry.csv"
 
 prepare-csv: bootstrap
 	@if [ -f "$(SCREENER_CSV)" ]; then \
@@ -232,6 +247,7 @@ prepare-universe: venv
 		$(PYTHON) scripts/prepare_universe.py \
 			--date "$(RUN_DATE)" \
 			--universe-csv "$(NSE_UNIVERSE_CSV)" \
+			--classification-csv "$(CLASSIFICATION_CSV)" \
 			--fundamentals-csv "$(FUNDAMENTALS_CSV)" \
 			--output-csv "$(SCREENER_CSV)" \
 			--report-json "$(UNIVERSE_REPORT)" \
@@ -240,6 +256,7 @@ prepare-universe: venv
 		$(PYTHON) scripts/prepare_universe.py \
 			--date "$(RUN_DATE)" \
 			--universe-csv "$(NSE_UNIVERSE_CSV)" \
+			--classification-csv "$(CLASSIFICATION_CSV)" \
 			--output-csv "$(SCREENER_CSV)" \
 			--report-json "$(UNIVERSE_REPORT)" \
 			--force; \
@@ -253,6 +270,10 @@ daily-run: venv
 	@$(MAKE) fetch-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" BHAVCOPY_ZIP="$(BHAVCOPY_ZIP)" CLASSIFICATION_CSV="$(CLASSIFICATION_CSV)" MISSING_CLASSIFICATION_CSV="$(MISSING_CLASSIFICATION_CSV)" REQUIRE_CLASSIFICATION="$(REQUIRE_CLASSIFICATION)"
 	@echo "=== Fetch Fundamentals (screener.in scrape) ==="
 	@$(MAKE) fetch-screener-data RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPER_DELAY="$(SCRAPER_DELAY)" SCRAPER_LIMIT="$(SCRAPER_LIMIT)" SCRAPER_WORKERS="$(SCRAPER_WORKERS)" SCRAPER_FORCE_REFRESH="$(SCRAPER_FORCE_REFRESH)"
+	@echo "=== Refresh Classification Master ==="
+	@$(MAKE) build-classification RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" CLASSIFICATION_CSV="$(CLASSIFICATION_CSV)"
+	@echo "=== Fetch Price History ==="
+	@$(MAKE) fetch-price-history RUN_DATE="$(RUN_DATE)" SESSIONS="$(SESSIONS)" MAX_CALENDAR_DAYS="$(MAX_CALENDAR_DAYS)"
 	@SCRAPED_FILE="$(SCREENER_CSV)"; \
 	FUND_FILE="$(FUNDAMENTALS_CSV)"; \
 	if [ -n "$$FUND_FILE" ] && [ "$$FUND_FILE" != "$$SCRAPED_FILE" ] && [ -f "$$FUND_FILE" ] && [ -s "$$FUND_FILE" ] && [ "$$(wc -l < "$$FUND_FILE")" -gt 1 ] && head -n 1 "$$FUND_FILE" | grep -q ','; then \

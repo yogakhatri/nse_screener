@@ -192,6 +192,88 @@ def compute_iv_general(
     return iv if iv > 0 else None
 
 
+def compute_iv_general_sector_adjusted(
+    sector: str,
+    basic_industry: str,
+    eps_fy0: Optional[float],
+    eps_fy1: Optional[float],
+    eps_fy2: Optional[float],
+    eps_ttm: Optional[float],
+    bvps: Optional[float],
+    roe_ttm: Optional[float] = None,
+    roce_3y: Optional[float] = None,
+    growth_yoy: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Sector-aware intrinsic value for Template A.
+
+    Starts from the locked EPV/Graham model, then applies a conservative sector
+    and quality adjustment. This keeps valuation deterministic while avoiding
+    one-size-fits-all treatment across IT, FMCG, pharma, cyclicals, real estate,
+    and commodity businesses.
+    """
+    base_iv = compute_iv_general(
+        eps_fy0=eps_fy0,
+        eps_fy1=eps_fy1,
+        eps_fy2=eps_fy2,
+        eps_ttm=eps_ttm,
+        bvps=bvps,
+    )
+    if base_iv is None:
+        return None
+
+    text = f"{sector or ''} {basic_industry or ''}".lower()
+    sector_multiplier = 1.0
+    if any(token in text for token in ["information technology", "it - services", "software"]):
+        sector_multiplier = 1.10
+    elif any(token in text for token in ["consumer", "fmcg", "food", "personal care", "household"]):
+        sector_multiplier = 1.08
+    elif any(token in text for token in ["healthcare", "pharma", "pharmaceutical", "hospital", "diagnostic"]):
+        sector_multiplier = 1.06
+    elif any(token in text for token in ["retail", "qsr", "restaurant", "apparel"]):
+        sector_multiplier = 1.02
+    elif any(token in text for token in ["capital goods", "electrical equipment", "defence", "aerospace"]):
+        sector_multiplier = 1.00
+    elif any(token in text for token in ["chemicals", "auto", "automobile", "ancillaries", "industrial"]):
+        sector_multiplier = 0.96
+    elif any(token in text for token in ["telecom", "media", "entertainment"]):
+        sector_multiplier = 0.94
+    elif any(token in text for token in ["infrastructure", "cement", "construction material"]):
+        sector_multiplier = 0.92
+    elif any(token in text for token in ["oil", "gas", "metal", "mining", "commodity", "power", "utilities"]):
+        sector_multiplier = 0.90
+    elif any(token in text for token in ["realty", "real estate", "construction"]):
+        sector_multiplier = 0.88
+
+    quality_multiplier = 1.0
+    profitability = max(v for v in [roe_ttm, roce_3y, 0.0] if v is not None)
+    if profitability >= 25:
+        quality_multiplier += 0.08
+    elif profitability >= 18:
+        quality_multiplier += 0.04
+    elif profitability > 0 and profitability < 10:
+        quality_multiplier -= 0.08
+
+    if growth_yoy is not None:
+        if growth_yoy >= 18:
+            quality_multiplier += 0.06
+        elif growth_yoy < 0:
+            quality_multiplier -= 0.07
+
+    if any(token in text for token in ["oil", "gas", "metal", "mining", "commodity", "power"]):
+        if growth_yoy is not None and growth_yoy >= 25:
+            quality_multiplier -= 0.05  # avoid peak-cycle overvaluation in cyclicals
+        if profitability >= 30:
+            quality_multiplier -= 0.04
+
+    if any(token in text for token in ["real estate", "realty", "construction"]):
+        if roce_3y is not None and roce_3y < 8:
+            quality_multiplier -= 0.05
+
+    multiplier = max(0.75, min(1.25, sector_multiplier * quality_multiplier))
+    return base_iv * multiplier
+
+
 def compute_iv_gap(close: float, iv: Optional[float]) -> Optional[float]:
     """
     METRIC    : iv_gap / discount_to_iv — % Discount of Price to Intrinsic Value
@@ -224,6 +306,71 @@ def compute_fair_pb(roe_ttm: Optional[float],
     if roe_ttm is None or roe_ttm <= 0:
         return None
     return (roe_ttm / 100.0) / coe
+
+
+def compute_fair_pb_financial_adjusted(
+    roe_ttm: Optional[float],
+    coe: float,
+    gnpa_pct: Optional[float] = None,
+    nnpa_pct: Optional[float] = None,
+    pcr_pct: Optional[float] = None,
+    car_pct: Optional[float] = None,
+    nim_pct: Optional[float] = None,
+    credit_cost_pct: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Asset-quality adjusted justified P/B for banks and NBFCs.
+
+    Base fair P/B is ROE/COE. Adjustments penalize weak asset quality, weak
+    provisioning, low capital adequacy, thin NIM, and high credit cost. This is
+    intentionally conservative for internal research screening.
+    """
+    fair_pb = compute_fair_pb(roe_ttm=roe_ttm, coe=coe)
+    if fair_pb is None:
+        return None
+
+    multiplier = 1.0
+    if gnpa_pct is not None:
+        if gnpa_pct > 8:
+            multiplier -= 0.18
+        elif gnpa_pct > 5:
+            multiplier -= 0.10
+        elif gnpa_pct < 2:
+            multiplier += 0.04
+
+    if nnpa_pct is not None:
+        if nnpa_pct > 3:
+            multiplier -= 0.12
+        elif nnpa_pct < 1:
+            multiplier += 0.03
+
+    if pcr_pct is not None:
+        if pcr_pct < 55:
+            multiplier -= 0.10
+        elif pcr_pct >= 75:
+            multiplier += 0.04
+
+    if car_pct is not None:
+        if car_pct < 14:
+            multiplier -= 0.08
+        elif car_pct >= 18:
+            multiplier += 0.04
+
+    if nim_pct is not None:
+        if nim_pct < 2.5:
+            multiplier -= 0.06
+        elif nim_pct >= 4:
+            multiplier += 0.04
+
+    if credit_cost_pct is not None:
+        if credit_cost_pct > 2.5:
+            multiplier -= 0.10
+        elif credit_cost_pct < 1:
+            multiplier += 0.03
+
+    multiplier = max(0.65, min(1.20, multiplier))
+    adjusted = fair_pb * multiplier
+    return adjusted if adjusted > 0 else None
 
 
 def compute_fair_value_gap(pb_current: float, fair_pb: Optional[float]) -> Optional[float]:
@@ -701,12 +848,13 @@ def compute_promoter_pledge_risk(pledge_pct: Optional[float]) -> Optional[float]
     LOOKBACK  : Latest quarter
     FORMULA   : Look up PLEDGE_TABLE → return raw_risk score
     DISQUALIFIER: pledge_pct > 60% → raw_risk = 100 → card forced to Severe
-    FALLBACK  : If shareholding pattern not filed (rare): assume 0% (clean)
-                Log assumption in data_gaps.csv; verify manually before acting.
+    FALLBACK  : None if shareholding/pledge data is unavailable. Missing pledge
+                data is handled by the engine's critical-risk data gate, not by
+                assuming the company is clean.
     DIRECTION : higher_is_better = False (higher raw_risk = lower percentile score = riskier)
     """
     if pledge_pct is None:
-        return 0.0   # assume clean per fallback rule
+        return None
     for lo, hi, risk, _ in PLEDGE_TABLE:
         if lo <= pledge_pct < hi:
             return risk

@@ -48,6 +48,8 @@ MACRO_SECTOR_ALIASES = ["Macro Sector", "Macro", "MacroSector"]
 SECTOR_ALIASES = ["Sector", "SECTOR"]
 INDUSTRY_ALIASES = ["Industry", "INDUSTRY"]
 BASIC_INDUSTRY_ALIASES = ["Basic Industry", "BasicIndustry", "BASIC INDUSTRY"]
+CLASSIFICATION_SOURCE_ALIASES = ["Classification Source", "ClassificationSource"]
+CLASSIFICATION_CONFIDENCE_ALIASES = ["Classification Confidence", "ClassificationConfidence"]
 
 
 def _norm(name: str) -> str:
@@ -233,6 +235,8 @@ def build_universe_from_bhavcopy(df: pd.DataFrame, include_non_eq: bool) -> pd.D
     out["Sector"] = ""
     out["Industry"] = ""
     out["Basic Industry"] = ""
+    out["Classification Source"] = ""
+    out["Classification Confidence"] = ""
 
     out = out[out["NSE Symbol"] != ""]
     if not include_non_eq:
@@ -265,15 +269,27 @@ def load_classification_master(path: Path) -> pd.DataFrame:
     out["class__Sector"] = _col(SECTOR_ALIASES)
     out["class__Industry"] = _col(INDUSTRY_ALIASES)
     out["class__Basic Industry"] = _col(BASIC_INDUSTRY_ALIASES)
+    out["class__Classification Source"] = _col(CLASSIFICATION_SOURCE_ALIASES)
+    out["class__Classification Confidence"] = _col(CLASSIFICATION_CONFIDENCE_ALIASES)
     return out
 
 
 def apply_classification(universe_df: pd.DataFrame, class_df: pd.DataFrame) -> pd.DataFrame:
     merged = universe_df.merge(class_df, how="left", on="NSE Symbol")
-    for col in ["Name", "Macro Sector", "Sector", "Industry", "Basic Industry"]:
+    for col in [
+        "Name",
+        "Macro Sector",
+        "Sector",
+        "Industry",
+        "Basic Industry",
+        "Classification Source",
+        "Classification Confidence",
+    ]:
         class_col = f"class__{col}"
         if class_col not in merged.columns:
             continue
+        if col not in merged.columns:
+            merged[col] = ""
         fallback = merged[class_col].fillna("").astype(str).str.strip()
         merged[col] = merged[col].where(
             merged[col].astype(str).str.strip() != "",

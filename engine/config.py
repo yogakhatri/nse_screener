@@ -33,6 +33,12 @@ from typing import FrozenSet
 # Higher values improve percentile stability but can force broader peer buckets.
 PEER_MIN_BASIC_INDUSTRY: int = 8
 PEER_MIN_INDUSTRY: int = 5
+PEER_MIN_SECTOR: int = 8
+
+# Minimum number of peer metric observations required before percentile scoring
+# is considered meaningful. If fewer observations are available, that sub-metric
+# becomes missing instead of being neutralized to 50.
+MIN_SCOREABLE_PEER_VALUES: int = 2
 
 # Minimum trading history (used by upstream loaders/adapters).
 # Raise this to avoid newly listed volatility; lower it to include fresh IPOs.
@@ -64,6 +70,13 @@ MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT: float = 25.0
 MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT: float = 55.0
 QUALITY_GATE_REQUIRE_ALL_CORE_CARDS: bool = True
 
+# If True, any active unsupported template blocks the whole run. If False, the
+# run continues but stocks in unsupported templates are marked Unsupported Data
+# and excluded from leaderboards/daily lists. This is safer for daily research
+# when, for example, banks/NBFCs lack asset-quality coverage but general stocks
+# are otherwise usable.
+BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES: bool = False
+
 # Raw price-derived metric controls.
 # When enabled, locally cached bhavcopy history becomes the preferred source for
 # price/technical metrics. CSV values are used only when raw history is missing.
@@ -91,6 +104,18 @@ AUTO_BEAR_RETURN_6M_THRESHOLD: float = -8.0
 AUTO_BEAR_DRAWDOWN_RECOVERY_THRESHOLD: float = 45.0
 AUTO_BULL_RETURN_6M_THRESHOLD: float = 8.0
 AUTO_BULL_DRAWDOWN_RECOVERY_THRESHOLD: float = 60.0
+
+# Auto-regime coverage guard. If public index data is unavailable, stock-level
+# inference requires enough price coverage to avoid regime calls from a tiny
+# subset of the universe.
+MIN_MARKET_MODE_OBSERVATIONS: int = 100
+MIN_MARKET_MODE_COVERAGE_PCT: float = 35.0
+INDEX_REGIME_LOOKBACK_SESSIONS: int = 260
+INDEX_REGIME_MIN_SESSIONS: int = 126
+INDEX_BEAR_RETURN_6M_THRESHOLD: float = -8.0
+INDEX_BULL_RETURN_6M_THRESHOLD: float = 8.0
+INDEX_BEAR_BREADTH_THRESHOLD: float = 40.0
+INDEX_BULL_BREADTH_THRESHOLD: float = 60.0
 
 # In bear markets, we require higher quality and stronger gate checks.
 BEAR_MODE_QUALITY_BONUS: float = 1.10   # Multiplies quality contribution.
@@ -441,6 +466,94 @@ PORTFOLIO_MAX_SECTOR_WEIGHT_PCT: float = 28.0
 # Minimum confidence to include in suggested portfolio.
 PORTFOLIO_MIN_CONFIDENCE: str = "Medium"
 
+# Internal research-tool daily list controls.
+# These keep the mixed list diversified and stop banks/NBFCs from taking over
+# the final daily shortlist even when that template is strong.
+# Total names in the cross-sector daily shortlist.
+DAILY_LIST_MAX_NAMES: int = 15
+# Hard sector cap inside the mixed daily shortlist.
+DAILY_LIST_MAX_PER_SECTOR: int = 2
+# Total Financial Services allowance inside the mixed list.
+DAILY_LIST_MAX_FINANCIAL_NAMES: int = 3
+# Bank-only allowance inside the mixed list.
+DAILY_LIST_MAX_BANK_NAMES: int = 2
+# NBFC/HFC-only allowance inside the mixed list.
+DAILY_LIST_MAX_NBFC_NAMES: int = 2
+# Minimum recommendation confidence required to appear in the mixed list.
+DAILY_LIST_MIN_CONFIDENCE: str = "Low"
+
+# ============================================================================
+# Data Quality and Source Confidence
+# ============================================================================
+
+# A stock needs at least this total data-quality score to be actionable.
+# The score combines classification confidence, fundamentals source, price
+# source, valuation evidence, and core-card coverage. Lower this only when
+# deliberately running exploratory screens.
+MIN_DATA_QUALITY_SCORE_ACTIONABLE: float = 70.0
+
+# A stock below this score is research-only at best.
+MIN_DATA_QUALITY_SCORE_RESEARCH: float = 45.0
+
+# Minimum source quality required before the engine can publish Buy Candidate.
+GATE_MIN_DATA_QUALITY_SCORE: float = 65.0
+
+# Critical-risk inputs. Missing values here do not mean the company is bad, but
+# they do mean the tool cannot safely call the result actionable without review.
+GENERAL_CRITICAL_RISK_FIELDS = (
+    "pledge_pct",
+    "avg_daily_turnover_cr",
+    "asm_stage",
+    "gsm_stage",
+    "interest_coverage",
+    "debt_to_equity",
+    "governance_events",
+)
+BANK_CRITICAL_RISK_FIELDS = (
+    "avg_daily_turnover_cr",
+    "asm_stage",
+    "gsm_stage",
+    "governance_events",
+    "gnpa_pct",
+    "nnpa_pct",
+    "car_pct",
+    "pcr_pct",
+    "nim",
+    "credit_cost_discipline",
+)
+NBFC_CRITICAL_RISK_FIELDS = (
+    "avg_daily_turnover_cr",
+    "asm_stage",
+    "gsm_stage",
+    "governance_events",
+    "gnpa_pct",
+    "nnpa_pct",
+    "car_pct",
+    "pcr_pct",
+    "alm_st_pct",
+    "nim",
+    "credit_cost_discipline",
+)
+MISSING_CRITICAL_FIELD_PENALTY: float = 4.0
+MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE: int = 1
+MAX_MISSING_CRITICAL_FIELDS_RESEARCH: int = 4
+
+# Financial templates require a minimum number of asset-quality inputs before a
+# bank/NBFC valuation can be treated as actionable.
+MIN_FINANCIAL_ASSET_QUALITY_FIELDS: int = 4
+
+# Value-trap guard. Cheap stocks with deteriorating fundamentals, weak cash
+# conversion, high leverage, or high red-flag risk are downgraded.
+VALUE_TRAP_WARN_THRESHOLD: float = 45.0
+VALUE_TRAP_BLOCK_THRESHOLD: float = 65.0
+
+# Historical calibration. Backtest can write data/processed/model_calibration.json.
+# The engine uses it as a conservative upside/selection multiplier when present.
+CALIBRATION_PROFILE_PATH: str = "data/processed/model_calibration.json"
+CALIBRATION_MIN_SAMPLE_SIZE: int = 10
+CALIBRATION_MIN_HIT_RATE_PCT: float = 50.0
+CALIBRATION_MIN_MEAN_RETURN_PCT: float = 0.0
+
 # ============================================================================
 # Monitoring and Recalibration
 # ============================================================================
@@ -652,7 +765,7 @@ def validate_runtime_config() -> None:
         raise ValueError(f"CARD_LABELS missing cards: {missing_labels}")
 
     invalid_conf = [
-        label for label in [GATE_MIN_CONFIDENCE_FOR_BUY, PORTFOLIO_MIN_CONFIDENCE]
+        label for label in [GATE_MIN_CONFIDENCE_FOR_BUY, PORTFOLIO_MIN_CONFIDENCE, DAILY_LIST_MIN_CONFIDENCE]
         if label not in CONFIDENCE_LEVELS
     ]
     if invalid_conf:
@@ -672,10 +785,49 @@ def validate_runtime_config() -> None:
         "MIN_TEMPLATE_CARD_RANKABLE_PCT": MIN_TEMPLATE_CARD_RANKABLE_PCT,
         "MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT": MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT,
         "MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT": MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT,
+        "MIN_MARKET_MODE_COVERAGE_PCT": MIN_MARKET_MODE_COVERAGE_PCT,
+        "INDEX_BEAR_BREADTH_THRESHOLD": INDEX_BEAR_BREADTH_THRESHOLD,
+        "INDEX_BULL_BREADTH_THRESHOLD": INDEX_BULL_BREADTH_THRESHOLD,
+        "CALIBRATION_MIN_HIT_RATE_PCT": CALIBRATION_MIN_HIT_RATE_PCT,
     }
     for name, value in pct_thresholds.items():
         if not (0.0 <= float(value) <= 100.0):
             raise ValueError(f"{name} must be within 0-100, found {value}")
+
+    positive_ints = {
+        "PEER_MIN_BASIC_INDUSTRY": PEER_MIN_BASIC_INDUSTRY,
+        "PEER_MIN_INDUSTRY": PEER_MIN_INDUSTRY,
+        "PEER_MIN_SECTOR": PEER_MIN_SECTOR,
+        "MIN_SCOREABLE_PEER_VALUES": MIN_SCOREABLE_PEER_VALUES,
+        "MIN_MARKET_MODE_OBSERVATIONS": MIN_MARKET_MODE_OBSERVATIONS,
+        "INDEX_REGIME_LOOKBACK_SESSIONS": INDEX_REGIME_LOOKBACK_SESSIONS,
+        "INDEX_REGIME_MIN_SESSIONS": INDEX_REGIME_MIN_SESSIONS,
+        "MIN_FINANCIAL_ASSET_QUALITY_FIELDS": MIN_FINANCIAL_ASSET_QUALITY_FIELDS,
+        "CALIBRATION_MIN_SAMPLE_SIZE": CALIBRATION_MIN_SAMPLE_SIZE,
+    }
+    for name, value in positive_ints.items():
+        if int(value) <= 0:
+            raise ValueError(f"{name} must be positive, found {value}")
+
+    if PEER_MIN_SECTOR < PEER_MIN_INDUSTRY:
+        raise ValueError("PEER_MIN_SECTOR should be >= PEER_MIN_INDUSTRY for stable fallback scoring")
+
+    if VALUE_TRAP_BLOCK_THRESHOLD <= VALUE_TRAP_WARN_THRESHOLD:
+        raise ValueError("VALUE_TRAP_BLOCK_THRESHOLD must be greater than VALUE_TRAP_WARN_THRESHOLD")
+
+    if MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE > MAX_MISSING_CRITICAL_FIELDS_RESEARCH:
+        raise ValueError(
+            "MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE must be <= MAX_MISSING_CRITICAL_FIELDS_RESEARCH"
+        )
+
+    for name, value in {
+        "QUALITY_GATE_REQUIRE_ALL_CORE_CARDS": QUALITY_GATE_REQUIRE_ALL_CORE_CARDS,
+        "ENABLE_RAW_PRICE_METRICS": ENABLE_RAW_PRICE_METRICS,
+        "RAW_PRICE_METRIC_FALLBACK_TO_CSV": RAW_PRICE_METRIC_FALLBACK_TO_CSV,
+        "BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES": BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES,
+    }.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be bool, found {type(value).__name__}")
 
     if PRICE_HISTORY_LOOKBACK_SESSIONS < MIN_TRADING_DAYS:
         raise ValueError(

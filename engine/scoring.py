@@ -5,7 +5,7 @@ Winsorizes at peer-group 5th/95th percentile, then converts to 0-100 rank score.
 from __future__ import annotations
 import numpy as np
 from typing import List, Optional
-from .config import WINSORIZE_LOWER, WINSORIZE_UPPER
+from .config import MIN_SCOREABLE_PEER_VALUES, WINSORIZE_LOWER, WINSORIZE_UPPER
 
 def winsorize_peer(values: np.ndarray) -> np.ndarray:
     """Cap values at 5th and 95th percentile of the peer distribution."""
@@ -36,13 +36,13 @@ def score_metric(
 ) -> Optional[float]:
     """
     Full pipeline: handle None, build array, winsorize, percentile-score.
-    Returns None if stock_value is missing.
+    Returns None if stock_value or usable peer observations are insufficient.
     """
     if stock_value is None:
         return None
     arr = np.array([v for v in peer_series if v is not None], dtype=float)
-    if len(arr) == 0:
-        return 50.0
+    if len(arr) < MIN_SCOREABLE_PEER_VALUES:
+        return None
     arr_w = winsorize_peer(np.append(arr, stock_value))
     stock_w = arr_w[-1]
     peers_w = arr_w[:-1]

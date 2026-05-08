@@ -18,6 +18,15 @@ class PeerLevel(str, Enum):
     SECTOR         = "Sector"
 
 @dataclass
+class MetricProvenance:
+    """Source metadata for one normalized metric."""
+    source: str
+    source_field: str = ""
+    confidence: str = "Low"
+    freshness: str = ""
+    method: str = "direct"
+
+@dataclass
 class NSEClassification:
     macro_sector:   str
     sector:         str
@@ -64,8 +73,14 @@ class StockRating:
     valuation_gap_score:  Optional[float] = None
     recommendation:       str = "Undetermined"
     recommendation_confidence: str = "Low"
+    recommendation_confidence_score: Optional[float] = None
+    recommendation_reason_codes: List[str] = field(default_factory=list)
+    recommendation_reasons: List[str] = field(default_factory=list)
+    recommendation_risk_flags: List[str] = field(default_factory=list)
     entry_signal:         str = "Unknown"
     market_mode:          str = "auto"
+    market_regime_source: str = "unknown"
+    market_regime_confidence: str = "Low"
     sector_regime_score:  Optional[float] = None
     sector_regime_label:  str = "Unknown"
     drawdown_resilience_score: Optional[float] = None
@@ -79,13 +94,33 @@ class StockRating:
     gate_fail_reasons:    List[str] = field(default_factory=list)
     staged_entry_plan:    str = "Not available"
     action_note:          str = ""
+    analysis_caveat:      str = ""
     sector_rank:          Optional[int] = None
     sector_percentile:    Optional[float] = None
     basic_industry_rank:  Optional[int] = None
     basic_industry_percentile: Optional[float] = None
+    peer_group_quality:   str = "Unknown"
+    peer_group_reasons:   List[str] = field(default_factory=list)
     template_supported:   bool = True
     template_support_status: str = "Supported"
     template_support_reasons: List[str] = field(default_factory=list)
+    classification_source: str = "unknown"
+    classification_confidence: str = "Low"
+    fundamentals_source: str = "unknown"
+    price_source: str = "missing"
+    research_status: str = "Unsupported"
+    research_status_reason: str = ""
+    data_quality_score: Optional[float] = None
+    data_quality_status: str = "Unknown"
+    data_quality_reasons: List[str] = field(default_factory=list)
+    missing_critical_fields: List[str] = field(default_factory=list)
+    unknown_risk_flags: List[str] = field(default_factory=list)
+    value_trap_score: Optional[float] = None
+    value_trap_flags: List[str] = field(default_factory=list)
+    calibration_status: str = "Not Calibrated"
+    calibration_multiplier: float = 1.0
+    metric_source_summary: Dict[str, int] = field(default_factory=dict)
+    field_provenance: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         from .output import to_dict
@@ -108,3 +143,8 @@ class RawStockData:
     # Surveillance flags (live NSE data)
     on_asm: bool = False
     on_gsm: bool = False
+    metric_provenance: Dict[str, MetricProvenance] = field(default_factory=dict)
+    classification_source: str = "unknown"
+    classification_confidence: str = "Low"
+    fundamentals_source: str = "unknown"
+    price_source: str = "missing"

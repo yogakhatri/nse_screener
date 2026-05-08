@@ -39,8 +39,17 @@ st.set_page_config(
 def load_run_data(run_dir: str) -> dict:
     """Load all data from a run directory."""
     rd = Path(run_dir)
-    data = {"stocks": [], "leaderboard": None, "run_log": None,
-            "bias_audit": None, "sector_summary": None, "buy_candidates": None}
+    data = {
+        "stocks": [],
+        "leaderboard": None,
+        "run_log": None,
+        "bias_audit": None,
+        "sector_summary": None,
+        "buy_candidates": None,
+        "source_registry": None,
+        "metric_provenance": None,
+        "data_quality_summary": None,
+    }
 
     # Load stock JSONs
     for sf in sorted(rd.glob("stock_*.json")):
@@ -81,6 +90,15 @@ def load_run_data(run_dir: str) -> dict:
     if ss_path.exists():
         data["sector_summary"] = pd.read_csv(ss_path)
 
+    for key, filename in [
+        ("source_registry", "source_registry.csv"),
+        ("metric_provenance", "metric_provenance.csv"),
+        ("data_quality_summary", "data_quality_summary.csv"),
+    ]:
+        path = rd / filename
+        if path.exists():
+            data[key] = pd.read_csv(path)
+
     return data
 
 
@@ -106,6 +124,15 @@ def stock_to_row(stock: dict) -> dict:
         "Score": stock.get("final_opportunity_score"),
         "Selection": stock.get("selection_score"),
         "Recommendation": normalize_recommendation(stock.get("recommendation", "")),
+        "Confidence Score": stock.get("recommendation_confidence_score"),
+        "Reason Codes": "; ".join(stock.get("recommendation_reason_codes") or []),
+        "Risk Flags": "; ".join(stock.get("recommendation_risk_flags") or []),
+        "Research Status": stock.get("research_status", ""),
+        "Data Quality": stock.get("data_quality_status", ""),
+        "Data Quality Score": stock.get("data_quality_score"),
+        "Metric Sources": "; ".join(
+            f"{source}:{count}" for source, count in sorted((stock.get("metric_source_summary") or {}).items())
+        ),
         "Entry Signal": stock.get("entry_signal", ""),
         "Performance": cards.get("performance", {}).get("score"),
         "Valuation": cards.get("valuation", {}).get("score"),
@@ -117,6 +144,9 @@ def stock_to_row(stock: dict) -> dict:
         "Upside %": stock.get("expected_upside_pct"),
         "Risk/Reward": stock.get("risk_reward_ratio"),
         "Market Mode": stock.get("market_mode", ""),
+        "Market Source": stock.get("market_regime_source", ""),
+        "Peer Quality": stock.get("peer_group_quality", ""),
+        "Value Trap": stock.get("value_trap_score"),
         "Gate Passed": stock.get("investability_gate_passed", False),
     }
 
@@ -161,6 +191,7 @@ NUMERIC_COLUMNS = [
     "Red Flags",
     "Upside %",
     "Risk/Reward",
+    "Data Quality Score",
 ]
 
 RECOMMENDATION_ALIASES = {
@@ -342,6 +373,7 @@ def main():
 
         # Display columns
         show_cols = ["Ticker", "Name", "Sector", "Score", "Recommendation",
+                     "Research Status", "Data Quality",
                      "Performance", "Valuation", "Growth", "Profitability",
                      "Entry Point", "Red Flags", "Upside %"]
         display_df_show = display_df[show_cols].head(100)
@@ -392,6 +424,12 @@ def main():
                     f"**Sector:** {cls.get('sector', '—')} | "
                     f"**Industry:** {cls.get('basic_industry', '—')} | "
                     f"**Template:** {stock_data.get('template_used', '—')}"
+                )
+                st.markdown(
+                    f"**Research Status:** {stock_data.get('research_status', '—')} | "
+                    f"**Data Quality:** {stock_data.get('data_quality_status', '—')} "
+                    f"({format_metric_number(stock_data.get('data_quality_score'))}) | "
+                    f"**Metric Sources:** {', '.join(f'{k}:{v}' for k, v in (stock_data.get('metric_source_summary') or {}).items()) or '—'}"
                 )
 
                 # Key metrics row
@@ -458,6 +496,24 @@ def main():
                             )
                             if card.get("reason"):
                                 st.caption(card["reason"])
+
+                provenance = stock_data.get("field_provenance", {})
+                if provenance:
+                    st.subheader("Metric Provenance")
+                    prov_df = pd.DataFrame(
+                        [
+                            {
+                                "Metric": metric,
+                                "Source": meta.get("source", ""),
+                                "Field": meta.get("source_field", ""),
+                                "Confidence": meta.get("confidence", ""),
+                                "Freshness": meta.get("freshness", ""),
+                                "Method": meta.get("method", ""),
+                            }
+                            for metric, meta in sorted(provenance.items())
+                        ]
+                    )
+                    st.dataframe(prov_df, hide_index=True, width="stretch", height=320)
 
                 # Gate status
                 st.subheader("Investability Gate")
@@ -657,6 +713,19 @@ def main():
                 st.json(json.loads(iq_path.read_text()))
             except json.JSONDecodeError:
                 pass
+
+        if data.get("data_quality_summary") is not None:
+            st.subheader("Data Quality Summary")
+            st.dataframe(data["data_quality_summary"], width="stretch", hide_index=True)
+
+        if data.get("source_registry") is not None:
+            st.subheader("Source Registry")
+            st.dataframe(data["source_registry"], width="stretch", hide_index=True)
+
+        if data.get("metric_provenance") is not None:
+            st.subheader("Metric Provenance Sample")
+            st.caption("Full file can be downloaded from the run folder; showing first 1,000 rows.")
+            st.dataframe(data["metric_provenance"].head(1000), width="stretch", height=360, hide_index=True)
 
 
 if __name__ == "__main__":
