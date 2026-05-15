@@ -63,6 +63,13 @@ class SourceRegistryTests(unittest.TestCase):
             self.assertEqual(registry["overall_status"], "ok")
             self.assertEqual(registry["sources"][0]["status"], "missing_optional")
 
+    def test_default_registry_includes_public_enrichment_sources(self) -> None:
+        registry = build_registry(date(2026, 4, 9), screener_csv=Path("missing.csv"))
+        source_ids = {source["source_id"] for source in registry["sources"]}
+        self.assertIn("governance_events", source_ids)
+        self.assertIn("financial_asset_quality", source_ids)
+        self.assertIn("shareholding", source_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

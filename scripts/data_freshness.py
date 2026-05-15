@@ -13,6 +13,8 @@ Checks:
   - Index data availability
   - ASM/GSM data recency
   - Shareholding data age
+  - Governance event evidence age
+  - Bank/NBFC financial-risk evidence age
 
 Usage:
   python scripts/data_freshness.py --date 2026-03-12
@@ -188,7 +190,15 @@ def run_full_check(run_date: date, strict: bool = False) -> dict:
     shp_check = check_directory_freshness(FOLDER_MAP["shareholding"], "*.csv", max_age_days=90)
     report["checks"]["shareholding"] = shp_check
 
-    # 8. Classification
+    # 8. Governance events
+    governance_check = check_directory_freshness(FOLDER_MAP["governance"], "*.csv", max_age_days=120)
+    report["checks"]["governance"] = governance_check
+
+    # 9. Bank/NBFC asset-quality and debt-risk evidence
+    financial_risk_check = check_directory_freshness(FOLDER_MAP["financial_risk"], "*.csv", max_age_days=120)
+    report["checks"]["financial_risk"] = financial_risk_check
+
+    # 10. Classification
     cls_check = check_file_freshness(
         FOLDER_MAP["classification"] / "nse_symbol_classification_master.csv",
         max_age_days=30,

@@ -69,6 +69,7 @@ OUTPUT_COLUMNS = [
     "NSE Symbol", "Name",
     "Macro Sector", "Sector", "Industry", "Basic Industry",
     "Classification Source", "Classification Confidence", "Fundamentals Source",
+    "Market Cap",
     "P/E", "Price to Book value", "EV / EBITDA", "FCF Yield",
     "Sales growth 3Years", "Profit growth 3Years",
     "Sales growth", "Profit growth",          # YoY
@@ -359,6 +360,8 @@ def scrape_stock(symbol: str, session: requests.Session) -> dict:
             if src.lower() in k.lower():
                 row[dst] = _f(v) if _f(v) is not None else v
                 break
+    if _f(row.get("_market_cap_cr")) is not None:
+        row["Market Cap"] = _f(row.get("_market_cap_cr"))
 
     # Current Price from the price element
     price_el = tree.xpath('//div[@id="company-info"]//span[@class="number"][1] | //*[@id="current-price"]')

@@ -1,0 +1,3 @@
+NSE Symbol,Governance Events,Governance Risk,Source URL,As Of Date,Notes
+RELIANCE,none,0,https://example.com/exchange-announcements,2026-04-09,Use none only after checking public filings for the lookback window.
+ABC,Auditor resignation; SEBI order,85,https://example.com/exchange-announcements,2026-04-09,Semicolon-separated adverse events are supported.

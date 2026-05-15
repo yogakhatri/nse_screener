@@ -13,7 +13,9 @@ Folder contract:
   /data/raw/classification/           ← NSE industry classification PDFs + parsed CSV
   /data/raw/redflags/asm/             ← ASM list downloads (dated)
   /data/raw/redflags/gsm/             ← GSM list downloads (dated)
+  /data/raw/redflags/governance/      ← Public governance/auditor/regulatory event CSVs
   /data/raw/redflags/shareholding/    ← BSE SHP XBRL by {symbol}/{quarter}/
+  /data/raw/fundamentals/financial_risk/ ← Bank/NBFC asset-quality and debt-risk CSVs
   /data/processed/                    ← Cleaned parquet/CSV files ready for engine
   /data/processed/universe/           ← Universe prep reports + missing-symbol diagnostics
   /runs/{YYYY-MM-DD}/                 ← One folder per engine run date
@@ -48,7 +50,9 @@ FOLDER_MAP = {
     "classification":  PROJECT_ROOT / "data/raw/classification",
     "asm":             PROJECT_ROOT / "data/raw/redflags/asm",
     "gsm":             PROJECT_ROOT / "data/raw/redflags/gsm",
+    "governance":      PROJECT_ROOT / "data/raw/redflags/governance",
     "shareholding":    PROJECT_ROOT / "data/raw/redflags/shareholding",
+    "financial_risk":  PROJECT_ROOT / "data/raw/fundamentals/financial_risk",
     "processed":       PROJECT_ROOT / "data/processed",
     "processed_universe": PROJECT_ROOT / "data/processed/universe",
     "logs":            PROJECT_ROOT / "logs",
@@ -80,9 +84,10 @@ class RunLogger:
     Call .start() at beginning, .log_input() for each data file used,
     .log_scores() with the leaderboard, .finish() at end.
     """
-    def __init__(self, run_date: Optional[date] = None):
+    def __init__(self, run_date: Optional[date] = None, folder: Optional[Path] = None):
         self.run_date  = run_date or date.today()
-        self.folder    = run_folder(self.run_date)
+        self.folder    = folder or run_folder(self.run_date)
+        self.folder.mkdir(parents=True, exist_ok=True)
         self.start_ts  = datetime.now().isoformat()
         self.inputs:   List[dict] = []
         self.errors:   List[str] = []

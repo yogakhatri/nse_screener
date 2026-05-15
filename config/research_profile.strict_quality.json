@@ -1,0 +1,27 @@
+{
+  "profile_name": "strict_quality_value_1y",
+  "investment_horizon": "1y",
+  "risk_level": "conservative",
+  "sector_preference": [],
+  "market_cap_preference": "exclude_micro",
+  "min_market_cap_cr": 500,
+  "max_pe": 35,
+  "max_pb": 8,
+  "min_fcf_yield": 0,
+  "min_iv_gap": 10,
+  "min_expected_upside_pct": 15,
+  "min_rev_growth_yoy": 0,
+  "min_eps_growth_yoy": 0,
+  "max_debt_to_equity": 2.5,
+  "min_interest_coverage": 1.5,
+  "min_roce": 10,
+  "min_cfo_pat_ratio": 0.5,
+  "custom_weights": {
+    "selection_score": 0.3,
+    "potential_score": 0.25,
+    "valuation_gap_score": 0.2,
+    "profitability": 0.1,
+    "risk_reward_score": 0.05,
+    "red_flags": 0.1
+  }
+}

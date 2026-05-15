@@ -30,10 +30,23 @@ SCRAPER_DELAY ?= 1.5
 SCRAPER_LIMIT ?= 0
 SCRAPER_WORKERS ?= 1
 SCRAPER_FORCE_REFRESH ?= false
+PROFILE_CONFIG ?=
+INVESTMENT_HORIZON ?=
+RISK_LEVEL ?=
+SECTOR_PREFERENCE ?=
+MARKET_CAP_PREFERENCE ?=
+RUNNER_EXTRA_ARGS ?=
+SHAREHOLDING_CSV ?= data/raw/redflags/shareholding/shareholding_$(RUN_DATE).csv
+GOVERNANCE_CSV ?= data/raw/redflags/governance/governance_events_$(RUN_DATE).csv
+FINANCIAL_RISK_CSV ?= data/raw/fundamentals/financial_risk/financial_risk_$(RUN_DATE).csv
+PUBLIC_ENRICHMENT_REPORT ?= data/processed/public_enrichment_report_$(RUN_DATE).json
+ENRICHMENT_OVERWRITE ?= false
+GOVERNANCE_LOOKBACK_DAYS ?= 120
+GOVERNANCE_INPUT_JSON ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data build-classification source-registry prepare-csv enrich-fundamentals fetch-shareholding fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest backtest dashboard check check-config test clean clean-generated
+.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data build-classification source-registry prepare-csv enrich-fundamentals merge-public-enrichment fetch-shareholding fetch-governance-events fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest backtest dashboard check check-config test clean clean-generated
 
 help:
 	@echo "NSE Screener Make Targets"
@@ -48,7 +61,9 @@ help:
 	@echo "  make source-registry RUN_DATE=... [SCREENER_CSV=...]  Write source_registry.json/csv"
 	@echo "  make prepare-csv RUN_DATE=...      Create dated Screener CSV from template if missing"
 	@echo "  make enrich-fundamentals RUN_DATE=... [SCRAPE=true] [SCRAPE_LIMIT=N]  Compute missing metrics"
+	@echo "  make merge-public-enrichment RUN_DATE=... [SHAREHOLDING_CSV=...] [GOVERNANCE_CSV=...] [FINANCIAL_RISK_CSV=...]  Merge optional pledge/governance/financial-risk evidence"
 	@echo "  make fetch-shareholding RUN_DATE=... [SHP_LIMIT=N]  Fetch shareholding patterns from BSE"
+	@echo "  make fetch-governance-events RUN_DATE=... [GOVERNANCE_LOOKBACK_DAYS=120]  Fetch/classify public governance announcements"
 	@echo "  make fetch-delivery RUN_DATE=... [DELIVERY_SESSIONS=60]  Fetch delivery position data from NSE"
 	@echo "  make fetch-indices RUN_DATE=... [INDEX_SESSIONS=260]  Fetch Nifty index EOD data"
 	@echo "  make momentum-scoring RUN_DATE=...  Compute advanced momentum metrics"
@@ -64,6 +79,8 @@ help:
 	@echo "  make daily-run RUN_DATE=... [FUNDAMENTALS_CSV=...]  Auto: production if fundamentals file is valid, else debug"
 	@echo "  make auto-run RUN_DATE=... [FUNDAMENTALS_CSV=...]   Alias of daily-run"
 	@echo "  make run RUN_DATE=YYYY-MM-DD SCREENER_CSV=... [MODE=live|backtest] [MARKET_MODE=auto|bear|neutral|bull]"
+	@echo "       Optional profile args: PROFILE_CONFIG=config/research_profile.example.json INVESTMENT_HORIZON=1y RISK_LEVEL=balanced SECTOR_PREFERENCE='Healthcare,Information Technology' MARKET_CAP_PREFERENCE=exclude_micro"
+	@echo "       Advanced filters: RUNNER_EXTRA_ARGS='--max-pe 35 --min-roce 15 --min-expected-upside-pct 20'"
 	@echo "  make run-debug RUN_DATE=... SCREENER_CSV=...  (skip quality gate; debug only)"
 	@echo "  make run-backtest RUN_DATE=... SCREENER_CSV=... [MARKET_MODE=auto|bear|neutral|bull]"
 	@echo "  make check                         Python syntax check"
@@ -180,6 +197,35 @@ enrich-fundamentals: venv
 		exit 1; \
 	fi
 
+merge-public-enrichment: venv
+	@OVERWRITE_FLAG=""; \
+	if [ "$(ENRICHMENT_OVERWRITE)" = "true" ]; then \
+		OVERWRITE_FLAG="--overwrite"; \
+	fi; \
+	$(PYTHON) scripts/merge_public_enrichment.py \
+		--screener-csv "$(SCREENER_CSV)" \
+		--shareholding-csv "$(SHAREHOLDING_CSV)" \
+		--governance-csv "$(GOVERNANCE_CSV)" \
+		--financial-risk-csv "$(FINANCIAL_RISK_CSV)" \
+		--report-json "$(PUBLIC_ENRICHMENT_REPORT)" \
+		$$OVERWRITE_FLAG
+
+fetch-governance-events: venv
+	@INPUT_FLAG=""; \
+	MERGE_FLAG=""; \
+	if [ -n "$(GOVERNANCE_INPUT_JSON)" ]; then \
+		INPUT_FLAG="--input-json $(GOVERNANCE_INPUT_JSON)"; \
+	fi; \
+	if [ -f "$(SCREENER_CSV)" ]; then \
+		MERGE_FLAG="--merge-csv $(SCREENER_CSV)"; \
+	fi; \
+	$(PYTHON) scripts/fetch_governance_events.py \
+		--date "$(RUN_DATE)" \
+		--lookback-days "$(GOVERNANCE_LOOKBACK_DAYS)" \
+		--output-csv "$(GOVERNANCE_CSV)" \
+		$$INPUT_FLAG \
+		$$MERGE_FLAG
+
 fetch-shareholding: venv
 	@$(PYTHON) scripts/fetch_shareholding.py \
 		--date "$(RUN_DATE)" \
@@ -281,16 +327,19 @@ daily-run: venv
 		echo "Using fundamentals file: $$FUND_FILE"; \
 		$(MAKE) prepare-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" FUNDAMENTALS_CSV="$$FUND_FILE" SCREENER_CSV="$(SCREENER_CSV)"; \
 		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
+		$(MAKE) merge-public-enrichment RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SHAREHOLDING_CSV="$(SHAREHOLDING_CSV)" GOVERNANCE_CSV="$(GOVERNANCE_CSV)" FINANCIAL_RISK_CSV="$(FINANCIAL_RISK_CSV)" PUBLIC_ENRICHMENT_REPORT="$(PUBLIC_ENRICHMENT_REPORT)" ENRICHMENT_OVERWRITE="$(ENRICHMENT_OVERWRITE)"; \
 		$(MAKE) run RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \
 	elif [ -f "$$SCRAPED_FILE" ] && [ -s "$$SCRAPED_FILE" ] && [ "$$(wc -l < "$$SCRAPED_FILE")" -gt 1 ] && head -n 1 "$$SCRAPED_FILE" | grep -q ','; then \
 		echo "=== Debug Mode (scraper-built fundamentals) ==="; \
 		echo "Using scraped file directly: $$SCRAPED_FILE"; \
 		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
+		$(MAKE) merge-public-enrichment RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SHAREHOLDING_CSV="$(SHAREHOLDING_CSV)" GOVERNANCE_CSV="$(GOVERNANCE_CSV)" FINANCIAL_RISK_CSV="$(FINANCIAL_RISK_CSV)" PUBLIC_ENRICHMENT_REPORT="$(PUBLIC_ENRICHMENT_REPORT)" ENRICHMENT_OVERWRITE="$(ENRICHMENT_OVERWRITE)"; \
 		$(MAKE) run-debug RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \
 	else \
 		echo "=== Debug Mode (universe only; no usable fundamentals file) ==="; \
 		$(MAKE) prepare-universe RUN_DATE="$(RUN_DATE)" NSE_UNIVERSE_CSV="$(NSE_UNIVERSE_CSV)" SCREENER_CSV="$(SCREENER_CSV)"; \
 		$(MAKE) enrich-fundamentals RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SCRAPE="$(SCRAPE)" SCRAPE_LIMIT="$(SCRAPE_LIMIT)"; \
+		$(MAKE) merge-public-enrichment RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" SHAREHOLDING_CSV="$(SHAREHOLDING_CSV)" GOVERNANCE_CSV="$(GOVERNANCE_CSV)" FINANCIAL_RISK_CSV="$(FINANCIAL_RISK_CSV)" PUBLIC_ENRICHMENT_REPORT="$(PUBLIC_ENRICHMENT_REPORT)" ENRICHMENT_OVERWRITE="$(ENRICHMENT_OVERWRITE)"; \
 		$(MAKE) run-debug RUN_DATE="$(RUN_DATE)" MODE="$(MODE)" MARKET_MODE="$(MARKET_MODE)" SCREENER_CSV="$(SCREENER_CSV)"; \
 	fi
 	@echo ""
@@ -311,7 +360,13 @@ run: venv ensure-csv
 		--date "$(RUN_DATE)" \
 		--mode "$(MODE)" \
 		--market-mode "$(MARKET_MODE)" \
-		--screener-csv "$(SCREENER_CSV)"
+		--screener-csv "$(SCREENER_CSV)" \
+		$(if $(INVESTMENT_HORIZON),--investment-horizon "$(INVESTMENT_HORIZON)",) \
+		$(if $(RISK_LEVEL),--risk-level "$(RISK_LEVEL)",) \
+		$(if $(MARKET_CAP_PREFERENCE),--market-cap-preference "$(MARKET_CAP_PREFERENCE)",) \
+		$(if $(SECTOR_PREFERENCE),--sector-preference "$(SECTOR_PREFERENCE)",) \
+		$(if $(PROFILE_CONFIG),--profile-config "$(PROFILE_CONFIG)",) \
+		$(RUNNER_EXTRA_ARGS)
 
 run-debug: venv ensure-csv
 	@$(PYTHON) scripts/run_engine.py \
@@ -319,6 +374,12 @@ run-debug: venv ensure-csv
 		--mode "$(MODE)" \
 		--market-mode "$(MARKET_MODE)" \
 		--screener-csv "$(SCREENER_CSV)" \
+		$(if $(INVESTMENT_HORIZON),--investment-horizon "$(INVESTMENT_HORIZON)",) \
+		$(if $(RISK_LEVEL),--risk-level "$(RISK_LEVEL)",) \
+		$(if $(MARKET_CAP_PREFERENCE),--market-cap-preference "$(MARKET_CAP_PREFERENCE)",) \
+		$(if $(SECTOR_PREFERENCE),--sector-preference "$(SECTOR_PREFERENCE)",) \
+		$(if $(PROFILE_CONFIG),--profile-config "$(PROFILE_CONFIG)",) \
+		$(RUNNER_EXTRA_ARGS) \
 		--skip-quality-gate
 
 run-backtest: MODE=backtest

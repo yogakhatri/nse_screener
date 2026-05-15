@@ -721,6 +721,36 @@ def _research_status(rating: StockRating) -> tuple[str, str]:
     return "Rejected", "Does not meet current research shortlist filters"
 
 
+def _research_tier(rating: StockRating) -> tuple[str, str]:
+    """Return the user-facing output tier for long-term research lists."""
+    if not rating.template_supported or rating.recommendation == "Unsupported":
+        return "Unsupported", "Template or sector model is not supported by available data"
+    if rating.data_quality_status == "Weak Data" or rating.recommendation == "Insufficient Data":
+        return "Data Incomplete", "Data quality is too weak for shortlist use"
+    if rating.missing_critical_fields:
+        return "Data Incomplete", "Critical risk evidence is missing"
+    if rating.value_trap_score is not None and rating.value_trap_score >= VALUE_TRAP_BLOCK_THRESHOLD:
+        return "Rejected", "Value-trap risk is above the configured block threshold"
+    if rating.recommendation == "Avoid" or rating.research_status == "Rejected":
+        return "Rejected", "Does not pass current long-term research filters"
+    if (
+        rating.research_status == "Actionable"
+        and rating.investability_gate_passed
+        and rating.data_quality_status == "Actionable Data"
+        and rating.recommendation == "Buy Candidate"
+    ):
+        return "High Confidence Research", "Passes score, gate, data-quality, and risk checks"
+    if (
+        rating.investability_gate_passed
+        and rating.data_quality_status == "Actionable Data"
+        and rating.recommendation in {"Buy Candidate", "Watchlist"}
+    ):
+        return "Qualified Watchlist", "Passes data and gate checks but still requires analyst review"
+    if rating.research_status == "Research Candidate":
+        return "Data Incomplete", "Interesting score profile, but evidence is not actionable yet"
+    return "Rejected", "No long-term research tier matched"
+
+
 def _set_recommendation_explanation(rating: StockRating) -> None:
     """Populate machine-readable and analyst-readable recommendation reasons."""
     codes: list[str] = []
@@ -930,6 +960,7 @@ def apply_advanced_overlays(
         )
         _set_recommendation_explanation(rating)
         rating.research_status, rating.research_status_reason = _research_status(rating)
+        rating.research_tier, rating.research_tier_reason = _research_tier(rating)
 
 
 def action_sheet_rows(ratings: Dict[str, StockRating]) -> List[dict]:
@@ -950,6 +981,8 @@ def action_sheet_rows(ratings: Dict[str, StockRating]) -> List[dict]:
                 "price_source": rating.price_source,
                 "research_status": rating.research_status,
                 "research_status_reason": rating.research_status_reason,
+                "research_tier": rating.research_tier,
+                "research_tier_reason": rating.research_tier_reason,
                 "data_quality_score": rating.data_quality_score,
                 "data_quality_status": rating.data_quality_status,
                 "data_quality_reasons": "; ".join(rating.data_quality_reasons),
@@ -982,6 +1015,11 @@ def action_sheet_rows(ratings: Dict[str, StockRating]) -> List[dict]:
                 "value_trap_flags": "; ".join(rating.value_trap_flags),
                 "calibration_status": rating.calibration_status,
                 "calibration_multiplier": rating.calibration_multiplier,
+                "user_profile": rating.user_profile_name,
+                "user_filter_passed": rating.user_filter_passed,
+                "user_filter_reasons": "; ".join(rating.user_filter_reasons),
+                "user_profile_score": rating.user_profile_score,
+                "user_profile_notes": "; ".join(rating.user_profile_notes),
                 "action_note": rating.action_note,
                 "analysis_caveat": rating.analysis_caveat,
             }
@@ -989,33 +1027,35 @@ def action_sheet_rows(ratings: Dict[str, StockRating]) -> List[dict]:
     return sorted(rows, key=lambda r: (r["selection_score"] or 0), reverse=True)
 
 
-def _daily_list_candidates(leaderboard: List[dict]) -> List[dict]:
+def _daily_list_candidates(leaderboard: List[dict], *, include_incomplete: bool = False) -> List[dict]:
     """
     Filter leaderboard rows down to names worth surfacing in daily research.
     """
     required_rank = _confidence_to_rank(DAILY_LIST_MIN_CONFIDENCE)
+    allowed_tiers = {"High Confidence Research", "Qualified Watchlist"}
+    if include_incomplete:
+        allowed_tiers.add("Data Incomplete")
     rows = [
         dict(row)
         for row in leaderboard
         if row.get("template_supported")
         and row.get("research_status") in {"Actionable", "Research Candidate"}
+        and row.get("research_tier") in allowed_tiers
         and row.get("recommendation") in {"Buy Candidate", "Watchlist"}
         and _confidence_to_rank(row.get("confidence", "Low")) >= required_rank
     ]
     return sorted(rows, key=lambda r: (r.get("selection_score") or 0), reverse=True)
 
 
-def daily_market_list_rows(leaderboard: List[dict]) -> List[dict]:
-    """
-    Build the mixed-market daily list with sector and financials caps.
-    """
+def _capped_daily_rows(candidates: List[dict]) -> List[dict]:
+    """Apply sector and financial caps to a pre-filtered candidate list."""
     sector_counts: Dict[str, int] = defaultdict(int)
     selected: List[dict] = []
     financial_total = 0
     bank_total = 0
     nbfc_total = 0
 
-    for row in _daily_list_candidates(leaderboard):
+    for row in candidates:
         if len(selected) >= DAILY_LIST_MAX_NAMES:
             break
         sector = row.get("sector", "Unknown")
@@ -1040,11 +1080,46 @@ def daily_market_list_rows(leaderboard: List[dict]) -> List[dict]:
     return selected
 
 
+def daily_market_list_rows(leaderboard: List[dict]) -> List[dict]:
+    """
+    Build the high-confidence mixed-market daily list.
+
+    Research-only/data-incomplete rows are intentionally excluded. The runner
+    writes those to `daily_research_queue.csv` for manual investigation.
+    """
+    return _capped_daily_rows(_daily_list_candidates(leaderboard))
+
+
+def daily_research_queue_rows(leaderboard: List[dict]) -> List[dict]:
+    """Build a capped queue including interesting but data-incomplete names."""
+    return _capped_daily_rows(_daily_list_candidates(leaderboard, include_incomplete=True))
+
+
+def data_incomplete_rows(leaderboard: List[dict]) -> List[dict]:
+    """Return profile-passing rows blocked by incomplete evidence."""
+    rows = [
+        dict(row)
+        for row in leaderboard
+        if row.get("research_tier") == "Data Incomplete"
+        and row.get("recommendation") in {"Buy Candidate", "Watchlist"}
+    ]
+    return sorted(rows, key=lambda r: (r.get("selection_score") or 0), reverse=True)
+
+
 def template_daily_rows(leaderboard: List[dict], template_code: str) -> List[dict]:
     """
     Build template-specific daily queues for banks or NBFCs/HFCs.
     """
     rows = [row for row in _daily_list_candidates(leaderboard) if row.get("template") == template_code]
+    return rows[:DAILY_LIST_MAX_NAMES]
+
+
+def template_research_queue_rows(leaderboard: List[dict], template_code: str) -> List[dict]:
+    """Build template-specific research queues including data-incomplete names."""
+    rows = [
+        row for row in _daily_list_candidates(leaderboard, include_incomplete=True)
+        if row.get("template") == template_code
+    ]
     return rows[:DAILY_LIST_MAX_NAMES]
 
 

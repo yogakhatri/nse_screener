@@ -173,8 +173,16 @@ def save_shareholding_data(data: list[dict], run_date: date) -> Path:
     return output_path
 
 
+def _has_merge_value(value: object) -> bool:
+    """Return True when a shareholding value should be merged into the base CSV."""
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"nan", "none", "null", "na", "n/a", "-"}
+
+
 def merge_into_screener_csv(screener_csv: Path, data: list[dict]) -> int:
-    """Merge shareholding data into screener CSV's Pledged percentage column."""
+    """Merge fetched shareholding fields into the Screener CSV without overwriting manual evidence."""
     if not screener_csv.exists() or not data:
         return 0
 
@@ -187,6 +195,21 @@ def merge_into_screener_csv(screener_csv: Path, data: list[dict]) -> int:
     if not sym_col:
         return 0
 
+    column_map = {
+        "pledge_pct": "Pledged percentage",
+        "promoter_pledge_pct": "Pledged percentage",
+        "promoter_holding_pct": "Promoter Holding %",
+        "promoter_holding_prev": "Promoter Holding Prev %",
+        "fii_holding_pct": "FII %",
+        "dii_holding_pct": "DII %",
+        "mf_holding_pct": "MF Holding %",
+    }
+    for column in set(column_map.values()):
+        if column not in df.columns:
+            df[column] = ""
+    if "Public Enrichment Source" not in df.columns:
+        df["Public Enrichment Source"] = ""
+
     holding_map = {item["symbol"]: item for item in data}
     updated = 0
 
@@ -194,9 +217,23 @@ def merge_into_screener_csv(screener_csv: Path, data: list[dict]) -> int:
         sym = str(row[sym_col]).strip().upper()
         if sym in holding_map:
             holding = holding_map[sym]
-            # Update pledge data if we found promoter holding
-            if "promoter_holding_pct" in holding:
+            row_updated = False
+            for source_key, destination_col in column_map.items():
+                value = holding.get(source_key)
+                if not _has_merge_value(value):
+                    continue
+                current = row.get(destination_col, "")
+                if _has_merge_value(current):
+                    continue
+                df.at[idx, destination_col] = value
                 updated += 1
+                row_updated = True
+            if row_updated:
+                source_text = str(row.get("Public Enrichment Source", "")).strip()
+                parts = [part.strip() for part in source_text.split(";") if part.strip()]
+                if "shareholding_fetch" not in parts:
+                    parts.append("shareholding_fetch")
+                df.at[idx, "Public Enrichment Source"] = "; ".join(parts)
 
     df.to_csv(screener_csv, index=False)
     return updated

@@ -259,6 +259,8 @@ class NSERatingEngine:
                 "price_source": r.price_source,
                 "research_status": r.research_status,
                 "research_status_reason": r.research_status_reason,
+                "research_tier": r.research_tier,
+                "research_tier_reason": r.research_tier_reason,
                 "data_quality_score": r.data_quality_score,
                 "data_quality_status": r.data_quality_status,
                 "data_quality_reasons": "; ".join(r.data_quality_reasons),
@@ -268,6 +270,11 @@ class NSERatingEngine:
                 "value_trap_flags": "; ".join(r.value_trap_flags),
                 "calibration_status": r.calibration_status,
                 "calibration_multiplier": r.calibration_multiplier,
+                "user_profile": r.user_profile_name,
+                "user_filter_passed": r.user_filter_passed,
+                "user_filter_reasons": "; ".join(r.user_filter_reasons),
+                "user_profile_score": r.user_profile_score,
+                "user_profile_notes": "; ".join(r.user_profile_notes),
                 "metric_source_summary": "; ".join(
                     f"{source}:{count}" for source, count in sorted(r.metric_source_summary.items())
                 ),

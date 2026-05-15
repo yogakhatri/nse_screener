@@ -428,6 +428,30 @@ class Phase1PipelineTests(unittest.TestCase):
             rows = metric_provenance_rows(universe)
             self.assertTrue(any(row["metric"] == "iv_gap" for row in rows))
 
+    def test_load_from_screener_ignores_nonpositive_valuation_multiples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "LOSS",
+                        "Name": "Loss Making Ltd",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                        "P/E": "-10",
+                        "Price to Book value": "-2",
+                        "EV / EBITDA": "0",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["LOSS"]
+            self.assertIsNone(stock.fundamentals["pe_percentile"])
+            self.assertIsNone(stock.fundamentals["pb_percentile"])
+            self.assertIsNone(stock.fundamentals.get("ev_ebitda_percentile"))
+
     def test_sector_adjusted_iv_applies_quality_and_sector_adjustment(self) -> None:
         it_iv = compute_iv_general_sector_adjusted(
             sector="Information Technology",

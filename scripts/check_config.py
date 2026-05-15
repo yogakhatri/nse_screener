@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from engine.cards import validate_metric_direction_map
 from engine.config import configured_core_cards, configured_template_codes, validate_runtime_config
+from engine.preferences import load_research_preferences
 from scripts.load_data import validate_loader_support
 
 
@@ -16,11 +17,15 @@ def main() -> None:
     validate_runtime_config()
     validate_metric_direction_map()
     validate_loader_support()
+    profile_paths = sorted(Path("config").glob("research_profile*.json"))
+    for profile_path in profile_paths:
+        load_research_preferences(str(profile_path))
 
     payload = {
         "status": "ok",
         "templates": list(configured_template_codes()),
         "core_cards": list(configured_core_cards()),
+        "research_profiles": [str(path) for path in profile_paths],
     }
     print("Config validation passed.")
     print(json.dumps(payload, indent=2))

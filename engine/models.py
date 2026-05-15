@@ -110,6 +110,8 @@ class StockRating:
     price_source: str = "missing"
     research_status: str = "Unsupported"
     research_status_reason: str = ""
+    research_tier: str = "Data Incomplete"
+    research_tier_reason: str = ""
     data_quality_score: Optional[float] = None
     data_quality_status: str = "Unknown"
     data_quality_reasons: List[str] = field(default_factory=list)
@@ -119,6 +121,11 @@ class StockRating:
     value_trap_flags: List[str] = field(default_factory=list)
     calibration_status: str = "Not Calibrated"
     calibration_multiplier: float = 1.0
+    user_profile_name: str = "default"
+    user_filter_passed: bool = True
+    user_filter_reasons: List[str] = field(default_factory=list)
+    user_profile_score: Optional[float] = None
+    user_profile_notes: List[str] = field(default_factory=list)
     metric_source_summary: Dict[str, int] = field(default_factory=dict)
     field_provenance: Dict[str, Dict[str, str]] = field(default_factory=dict)
 

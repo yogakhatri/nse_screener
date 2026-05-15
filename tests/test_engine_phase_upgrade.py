@@ -1,7 +1,7 @@
 import unittest
 
 from engine import NSERatingEngine, RawStockData, NSEClassification
-from engine.advanced import action_sheet_rows, daily_market_list_rows, portfolio_plan_rows
+from engine.advanced import action_sheet_rows, daily_market_list_rows, daily_research_queue_rows, data_incomplete_rows, portfolio_plan_rows
 from engine.bias_controls import BiasAudit
 from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS
@@ -137,6 +137,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "B",
                 "template_supported": True,
                 "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
                 "recommendation": "Buy Candidate",
                 "confidence": "High",
                 "selection_score": 90.0,
@@ -147,6 +148,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "B",
                 "template_supported": True,
                 "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
                 "recommendation": "Buy Candidate",
                 "confidence": "High",
                 "selection_score": 89.0,
@@ -157,6 +159,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "B",
                 "template_supported": True,
                 "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
                 "recommendation": "Buy Candidate",
                 "confidence": "High",
                 "selection_score": 88.0,
@@ -167,6 +170,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "C",
                 "template_supported": True,
                 "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
                 "recommendation": "Buy Candidate",
                 "confidence": "High",
                 "selection_score": 87.0,
@@ -177,6 +181,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "A",
                 "template_supported": True,
                 "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
                 "recommendation": "Buy Candidate",
                 "confidence": "High",
                 "selection_score": 86.0,
@@ -187,6 +192,7 @@ class PhaseUpgradeTests(unittest.TestCase):
                 "template": "A",
                 "template_supported": True,
                 "research_status": "Research Candidate",
+                "research_tier": "Qualified Watchlist",
                 "recommendation": "Watchlist",
                 "confidence": "Medium",
                 "selection_score": 85.0,
@@ -195,6 +201,35 @@ class PhaseUpgradeTests(unittest.TestCase):
         rows = daily_market_list_rows(leaderboard)
         financials = [row for row in rows if row["template"] in {"B", "C"}]
         self.assertLessEqual(len(financials), 3)
+
+    def test_daily_market_list_excludes_data_incomplete_rows(self) -> None:
+        leaderboard = [
+            {
+                "ticker": "AAA",
+                "sector": "Industrials",
+                "template": "A",
+                "template_supported": True,
+                "research_status": "Research Candidate",
+                "research_tier": "Data Incomplete",
+                "recommendation": "Watchlist",
+                "confidence": "Medium",
+                "selection_score": 90.0,
+            },
+            {
+                "ticker": "BBB",
+                "sector": "Healthcare",
+                "template": "A",
+                "template_supported": True,
+                "research_status": "Actionable",
+                "research_tier": "High Confidence Research",
+                "recommendation": "Buy Candidate",
+                "confidence": "High",
+                "selection_score": 80.0,
+            },
+        ]
+        self.assertEqual([row["ticker"] for row in daily_market_list_rows(leaderboard)], ["BBB"])
+        self.assertEqual([row["ticker"] for row in daily_research_queue_rows(leaderboard)], ["AAA", "BBB"])
+        self.assertEqual([row["ticker"] for row in data_incomplete_rows(leaderboard)], ["AAA"])
 
     def test_actionable_requires_usable_data_quality(self) -> None:
         stock = _make_stock("WEAKDATA", pe=22.0, growth=8.0)

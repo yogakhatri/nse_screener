@@ -124,9 +124,17 @@ DIRECT_ALIASES = {
     "margin_expansion":        ["Margin Expansion Score", "Margin Expansion"],
 }
 
+POSITIVE_ONLY_DIRECT_METRICS = {
+    "pe_percentile",
+    "pb_percentile",
+    "p_cfo_percentile",
+    "ev_ebitda_percentile",
+}
+
 RAW_ALIASES = {
     "close_price": ["Current Price", "CMP", "Close Price", "Price"],
     "intrinsic_value": ["Intrinsic Value", "Estimated Intrinsic Value", "Fair Value"],
+    "market_cap_cr": ["Market Capitalization", "Market Cap", "Market Cap Cr", "Mkt Cap", "MCap"],
     "pledge_pct": ["Pledged percentage", "Promoter Pledge", "Promoter Pledge %"],
     "book_value_per_share": ["Book Value Per Share", "Book Value", "BVPS"],
     "eps_ttm": ["EPS TTM", "EPS (TTM)", "TTM EPS"],
@@ -347,6 +355,8 @@ def _fill_direct_metrics(
             continue
         raw_value, field = _first_present_with_field(row, aliases)
         value = _as_float(raw_value)
+        if metric in POSITIVE_ONLY_DIRECT_METRICS and value is not None and value <= 0:
+            value = None
         if value is not None:
             fundamentals[metric] = value
             if provenance is not None:
@@ -811,6 +821,8 @@ def load_from_screener(
         fundamentals["beneish_m_score"] = raw.get("beneish_m_score")
         fundamentals["governance_events"] = raw.get("governance_events")
         fundamentals["close_price"] = raw.get("close_price")
+        fundamentals["market_cap_cr"] = raw.get("market_cap_cr")
+        fundamentals["dividend_yield"] = raw.get("dividend_yield")
         fundamentals["asm_stage"] = raw.get("asm_stage")
         fundamentals["gsm_stage"] = raw.get("gsm_stage")
 

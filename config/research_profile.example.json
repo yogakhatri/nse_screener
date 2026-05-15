@@ -1,0 +1,18 @@
+{
+  "profile_name": "quality_value_1y",
+  "investment_horizon": "1y",
+  "risk_level": "balanced",
+  "sector_preference": [],
+  "market_cap_preference": "all",
+  "max_pe": 45,
+  "max_pb": 12,
+  "min_iv_gap": 0,
+  "min_expected_upside_pct": 5,
+  "custom_weights": {
+    "selection_score": 0.35,
+    "potential_score": 0.25,
+    "valuation_gap_score": 0.2,
+    "risk_reward_score": 0.1,
+    "red_flags": 0.1
+  }
+}

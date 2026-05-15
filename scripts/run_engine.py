@@ -8,6 +8,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -18,19 +19,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from engine import NSERatingEngine
 from engine.advanced import (
     action_sheet_rows,
+    daily_research_queue_rows,
     daily_market_list_rows,
+    data_incomplete_rows,
     evaluate_recommendation_outcomes,
     portfolio_plan_rows,
     template_daily_rows,
+    template_research_queue_rows,
     update_recommendation_history,
 )
 from engine.bias_controls import BiasAudit
 from engine.config import (
     BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES,
+    BANK_CRITICAL_RISK_FIELDS,
     CARD_WEIGHTS,
+    GENERAL_CRITICAL_RISK_FIELDS,
     MIN_TEMPLATE_AVG_CORE_RANKABLE_PCT,
     MIN_TEMPLATE_CARD_RANKABLE_PCT,
     MIN_TEMPLATE_RED_FLAGS_RANKABLE_PCT,
+    NBFC_CRITICAL_RISK_FIELDS,
     QUALITY_GATE_REQUIRE_ALL_CORE_CARDS,
     configured_core_cards,
     validate_runtime_config,
@@ -38,6 +45,15 @@ from engine.config import (
 from scripts.load_data import load_from_screener, metric_coverage, metric_provenance_rows
 from scripts.local_storage import RunLogger
 from scripts.source_registry import _infer_source_data_date, build_registry, write_registry
+from engine.preferences import (
+    VALID_HORIZONS,
+    VALID_MARKET_CAP_PREFERENCES,
+    VALID_RISK_LEVELS,
+    apply_research_preferences,
+    filter_preference_rows,
+    load_research_preferences,
+    preferences_to_dict,
+)
 
 CORE_CARDS = list(configured_core_cards())
 
@@ -104,6 +120,47 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail if any required public source is missing, stale, or low coverage",
     )
+    parser.add_argument("--profile-config", default=None, help="JSON research preference profile")
+    parser.add_argument(
+        "--investment-horizon",
+        choices=VALID_HORIZONS,
+        default=None,
+        help="Long-term research horizon used for profile ranking",
+    )
+    parser.add_argument(
+        "--risk-level",
+        choices=VALID_RISK_LEVELS,
+        default=None,
+        help="Risk profile used for user filters and profile ranking",
+    )
+    parser.add_argument("--sector-preference", default=None, help="Comma-separated sector allowlist")
+    parser.add_argument(
+        "--market-cap-preference",
+        choices=VALID_MARKET_CAP_PREFERENCES,
+        default=None,
+        help="Approximate market-cap bucket preference",
+    )
+    parser.add_argument("--min-market-cap-cr", type=float, default=None)
+    parser.add_argument("--max-market-cap-cr", type=float, default=None)
+    parser.add_argument("--max-pe", type=float, default=None)
+    parser.add_argument("--max-pb", type=float, default=None)
+    parser.add_argument("--min-fcf-yield", type=float, default=None)
+    parser.add_argument("--min-iv-gap", type=float, default=None)
+    parser.add_argument("--min-expected-upside-pct", type=float, default=None)
+    parser.add_argument("--min-rev-growth-yoy", type=float, default=None)
+    parser.add_argument("--min-eps-growth-yoy", type=float, default=None)
+    parser.add_argument("--min-rev-cagr-3y", type=float, default=None)
+    parser.add_argument("--max-debt-to-equity", type=float, default=None)
+    parser.add_argument("--min-interest-coverage", type=float, default=None)
+    parser.add_argument("--min-roce", type=float, default=None)
+    parser.add_argument("--min-roe", type=float, default=None)
+    parser.add_argument("--min-cfo-pat-ratio", type=float, default=None)
+    parser.add_argument("--min-dividend-yield", type=float, default=None)
+    parser.add_argument(
+        "--custom-weights",
+        default=None,
+        help="JSON object for user ranking weights, e.g. '{\"potential_score\":0.5,\"red_flags\":0.5}'",
+    )
     return parser.parse_args()
 
 
@@ -115,6 +172,20 @@ def resolve_screener_csv(run_date: dt.date, arg_path: str | None) -> Path:
     if arg_path:
         return Path(arg_path)
     return Path("data/raw/fundamentals/screener") / f"screener_export_{run_date.isoformat()}.csv"
+
+
+def _slugify(value: str) -> str:
+    """Return a stable filesystem-safe slug."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip()).strip("._")
+    return slug or "default"
+
+
+def resolve_output_dir(run_date_str: str, profile_name: str) -> Path:
+    """Route non-default profiles to separate folders so runs do not overwrite."""
+    base = Path("runs") / run_date_str
+    if profile_name == "default":
+        return base
+    return base / "profiles" / _slugify(profile_name)
 
 
 def validate_screener_freshness(path: Path, run_date: dt.date, strict: bool) -> List[str]:
@@ -324,6 +395,8 @@ def refresh_research_status(ratings: Dict[str, object]) -> None:
         if not getattr(rating, "template_supported", False):
             rating.research_status = "Unsupported"
             rating.research_status_reason = "Template coverage is incomplete"
+            rating.research_tier = "Unsupported"
+            rating.research_tier_reason = "Template coverage is incomplete"
 
 
 def data_quality_summary_rows(ratings: Dict[str, object]) -> List[dict]:
@@ -353,6 +426,125 @@ def data_quality_summary_rows(ratings: Dict[str, object]) -> List[dict]:
                     "pct": round(count / total * 100.0, 2),
                 }
             )
+    return rows
+
+
+def _has_evidence_value(value: object) -> bool:
+    """Return True when a field has usable evidence for coverage reporting."""
+    if value is None or value == "":
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return True
+
+
+def _critical_fields_for_template(template_code: str) -> tuple[str, ...]:
+    if template_code == "B":
+        return BANK_CRITICAL_RISK_FIELDS
+    if template_code == "C":
+        return NBFC_CRITICAL_RISK_FIELDS
+    return GENERAL_CRITICAL_RISK_FIELDS
+
+
+def critical_field_coverage_rows(
+    ratings: Dict[str, object],
+    universe: Dict[str, object],
+) -> List[dict]:
+    """Report critical-risk evidence coverage by template and field."""
+    counters: dict[tuple[str, str], dict[str, object]] = {}
+    for ticker, rating in ratings.items():
+        stock = universe[ticker]
+        template = rating.template.value
+        for field in _critical_fields_for_template(template):
+            key = (template, field)
+            bucket = counters.setdefault(
+                key,
+                {
+                    "template": template,
+                    "field": field,
+                    "n_stocks": 0,
+                    "present": 0,
+                    "missing": 0,
+                    "source_counts": Counter(),
+                },
+            )
+            bucket["n_stocks"] += 1
+            value = stock.fundamentals.get(field)
+            provenance = stock.metric_provenance.get(field)
+            if _has_evidence_value(value) or provenance is not None:
+                bucket["present"] += 1
+                bucket["source_counts"][provenance.source if provenance else "csv_or_derived_unknown"] += 1
+            else:
+                bucket["missing"] += 1
+
+    rows: List[dict] = []
+    for (_, _), bucket in sorted(counters.items(), key=lambda item: (item[0][0], item[0][1])):
+        n_stocks = int(bucket["n_stocks"])
+        present = int(bucket["present"])
+        missing = int(bucket["missing"])
+        coverage_pct = round(present / n_stocks * 100.0, 2) if n_stocks else 0.0
+        source_counts: Counter = bucket["source_counts"]
+        rows.append(
+            {
+                "template": bucket["template"],
+                "field": bucket["field"],
+                "n_stocks": n_stocks,
+                "present": present,
+                "missing": missing,
+                "coverage_pct": coverage_pct,
+                "status": "ok" if coverage_pct >= 80.0 else ("weak" if coverage_pct >= 40.0 else "critical_gap"),
+                "source_counts": "; ".join(f"{source}:{count}" for source, count in sorted(source_counts.items())),
+            }
+        )
+    return rows
+
+
+def result_tier_summary_rows(ratings: Dict[str, object]) -> List[dict]:
+    """Summarise user-facing result tiers for the run."""
+    counter = Counter(getattr(rating, "research_tier", "Unknown") for rating in ratings.values())
+    total = sum(counter.values()) or 1
+    return [
+        {"research_tier": tier, "count": count, "pct": round(count / total * 100.0, 2)}
+        for tier, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def sector_readiness_rows(ratings: Dict[str, object]) -> List[dict]:
+    """Report sector-level readiness before users inspect stock-level ideas."""
+    buckets: dict[str, list] = {}
+    for rating in ratings.values():
+        buckets.setdefault(rating.classification.sector, []).append(rating)
+
+    rows: List[dict] = []
+    for sector, sector_ratings in sorted(buckets.items()):
+        n = len(sector_ratings)
+        tier_counts = Counter(r.research_tier for r in sector_ratings)
+        data_counts = Counter(r.data_quality_status for r in sector_ratings)
+        gate_pass = sum(1 for r in sector_ratings if r.investability_gate_passed)
+        actionable = sum(1 for r in sector_ratings if r.research_status == "Actionable")
+        avg_missing = round(
+            sum(len(r.missing_critical_fields) for r in sector_ratings) / n,
+            2,
+        ) if n else 0.0
+        rows.append(
+            {
+                "sector": sector,
+                "n_stocks": n,
+                "actionable": actionable,
+                "gate_passed": gate_pass,
+                "high_confidence": tier_counts.get("High Confidence Research", 0),
+                "qualified_watchlist": tier_counts.get("Qualified Watchlist", 0),
+                "data_incomplete": tier_counts.get("Data Incomplete", 0),
+                "rejected": tier_counts.get("Rejected", 0),
+                "unsupported": tier_counts.get("Unsupported", 0),
+                "actionable_data": data_counts.get("Actionable Data", 0),
+                "research_only_data": data_counts.get("Research Only Data", 0),
+                "weak_data": data_counts.get("Weak Data", 0),
+                "avg_missing_critical_fields": avg_missing,
+            }
+        )
     return rows
 
 
@@ -406,6 +598,8 @@ LEADERBOARD_COLUMNS = [
     "price_source",
     "research_status",
     "research_status_reason",
+    "research_tier",
+    "research_tier_reason",
     "data_quality_score",
     "data_quality_status",
     "data_quality_reasons",
@@ -415,6 +609,11 @@ LEADERBOARD_COLUMNS = [
     "value_trap_flags",
     "calibration_status",
     "calibration_multiplier",
+    "user_profile",
+    "user_filter_passed",
+    "user_filter_reasons",
+    "user_profile_score",
+    "user_profile_notes",
     "metric_source_summary",
     "valuation_metric_sources",
     "price_metric_sources",
@@ -517,6 +716,8 @@ def _unsupported_rows(ratings: Dict[str, object]) -> List[dict]:
                 "support_reason": "; ".join(rating.template_support_reasons),
                 "investability_status": rating.investability_status,
                 "recommendation": rating.recommendation,
+                "research_tier": rating.research_tier,
+                "research_tier_reason": rating.research_tier_reason,
             }
         )
     return sorted(rows, key=lambda r: (r["template"], r["ticker"]))
@@ -551,6 +752,30 @@ def _build_action_lists(leaderboard: List[dict]) -> tuple[List[dict], List[dict]
 def main() -> None:
     args = parse_args()
     validate_runtime_config()
+    preferences = load_research_preferences(
+        args.profile_config,
+        investment_horizon=args.investment_horizon,
+        risk_level=args.risk_level,
+        sector_preference=args.sector_preference,
+        market_cap_preference=args.market_cap_preference,
+        min_market_cap_cr=args.min_market_cap_cr,
+        max_market_cap_cr=args.max_market_cap_cr,
+        max_pe=args.max_pe,
+        max_pb=args.max_pb,
+        min_fcf_yield=args.min_fcf_yield,
+        min_iv_gap=args.min_iv_gap,
+        min_expected_upside_pct=args.min_expected_upside_pct,
+        min_rev_growth_yoy=args.min_rev_growth_yoy,
+        min_eps_growth_yoy=args.min_eps_growth_yoy,
+        min_rev_cagr_3y=args.min_rev_cagr_3y,
+        max_debt_to_equity=args.max_debt_to_equity,
+        min_interest_coverage=args.min_interest_coverage,
+        min_roce=args.min_roce,
+        min_roe=args.min_roe,
+        min_cfo_pat_ratio=args.min_cfo_pat_ratio,
+        min_dividend_yield=args.min_dividend_yield,
+        custom_weights=args.custom_weights,
+    )
     run_date = resolve_run_date(args.date)
     run_date_str = run_date.isoformat()
     run_mode = args.mode.lower()
@@ -615,10 +840,10 @@ def main() -> None:
                 )
             )
 
-    logger = RunLogger(run_date=run_date)
-    logger.start()
-    out_dir = Path("runs") / run_date_str
+    out_dir = resolve_output_dir(run_date_str, preferences.profile_name)
     out_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(run_date=run_date, folder=out_dir)
+    logger.start()
 
     source_registry = build_registry(run_date=run_date, screener_csv=screener_csv)
     write_registry(
@@ -682,16 +907,21 @@ def main() -> None:
         enforce=not args.skip_quality_gate,
     )
     refresh_research_status(ratings)
+    apply_research_preferences(ratings, universe, preferences)
     leaderboard = engine.to_leaderboard(
         ratings,
         exclude_statuses=("Insufficient Data", "Unsupported Data", "Uninvestable"),
     )
+    user_filtered_leaderboard = filter_preference_rows(leaderboard)
 
     for ticker, rating in ratings.items():
         with open(out_dir / f"stock_{ticker}.json", "w") as f:
             json.dump(rating.to_dict(), f, indent=2)
 
     _write_csv(out_dir / "leaderboard.csv", leaderboard, fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "user_filtered_leaderboard.csv", user_filtered_leaderboard, fieldnames=LEADERBOARD_COLUMNS)
+    with open(out_dir / "research_profile.json", "w") as f:
+        json.dump(preferences_to_dict(preferences), f, indent=2)
     _write_csv(
         out_dir / "coverage_by_template_card.csv",
         _coverage_rows(universe),
@@ -721,6 +951,44 @@ def main() -> None:
         fieldnames=["group", "value", "count", "pct"],
     )
     _write_csv(
+        out_dir / "result_tier_summary.csv",
+        result_tier_summary_rows(ratings),
+        fieldnames=["research_tier", "count", "pct"],
+    )
+    _write_csv(
+        out_dir / "critical_field_coverage.csv",
+        critical_field_coverage_rows(ratings, universe),
+        fieldnames=[
+            "template",
+            "field",
+            "n_stocks",
+            "present",
+            "missing",
+            "coverage_pct",
+            "status",
+            "source_counts",
+        ],
+    )
+    _write_csv(
+        out_dir / "sector_readiness.csv",
+        sector_readiness_rows(ratings),
+        fieldnames=[
+            "sector",
+            "n_stocks",
+            "actionable",
+            "gate_passed",
+            "high_confidence",
+            "qualified_watchlist",
+            "data_incomplete",
+            "rejected",
+            "unsupported",
+            "actionable_data",
+            "research_only_data",
+            "weak_data",
+            "avg_missing_critical_fields",
+        ],
+    )
+    _write_csv(
         out_dir / "metric_provenance.csv",
         metric_provenance_rows(universe),
         fieldnames=[
@@ -735,7 +1003,7 @@ def main() -> None:
         ],
     )
 
-    buy_candidates, undervalued, red_flag_exclusions = _build_action_lists(leaderboard)
+    buy_candidates, undervalued, red_flag_exclusions = _build_action_lists(user_filtered_leaderboard)
     _write_csv(out_dir / "buy_candidates.csv", buy_candidates, fieldnames=LEADERBOARD_COLUMNS)
     _write_csv(
         out_dir / "undervalued_high_potential.csv",
@@ -760,10 +1028,12 @@ def main() -> None:
             "support_reason",
             "investability_status",
             "recommendation",
+            "research_tier",
+            "research_tier_reason",
         ],
     )
 
-    sector_top, sector_summary = _ranked_sector_views(leaderboard)
+    sector_top, sector_summary = _ranked_sector_views(user_filtered_leaderboard)
     _write_csv(
         out_dir / "sector_top_10.csv",
         sector_top,
@@ -793,6 +1063,8 @@ def main() -> None:
             "price_source",
             "research_status",
             "research_status_reason",
+            "research_tier",
+            "research_tier_reason",
             "data_quality_score",
             "data_quality_status",
             "data_quality_reasons",
@@ -826,17 +1098,28 @@ def main() -> None:
             "value_trap_flags",
             "calibration_status",
             "calibration_multiplier",
+            "user_profile",
+            "user_filter_passed",
+            "user_filter_reasons",
+            "user_profile_score",
+            "user_profile_notes",
             "action_note",
             "analysis_caveat",
         ],
     )
 
-    daily_market_list = daily_market_list_rows(leaderboard)
+    daily_market_list = daily_market_list_rows(user_filtered_leaderboard)
+    daily_research_queue = daily_research_queue_rows(user_filtered_leaderboard)
+    daily_data_incomplete = data_incomplete_rows(user_filtered_leaderboard)
     _write_csv(out_dir / "daily_market_list.csv", daily_market_list, fieldnames=LEADERBOARD_COLUMNS)
-    _write_csv(out_dir / "daily_bank_list.csv", template_daily_rows(leaderboard, "B"), fieldnames=LEADERBOARD_COLUMNS)
-    _write_csv(out_dir / "daily_nbfc_list.csv", template_daily_rows(leaderboard, "C"), fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_research_queue.csv", daily_research_queue, fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_data_incomplete.csv", daily_data_incomplete, fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_bank_list.csv", template_daily_rows(user_filtered_leaderboard, "B"), fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_nbfc_list.csv", template_daily_rows(user_filtered_leaderboard, "C"), fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_bank_research_queue.csv", template_research_queue_rows(user_filtered_leaderboard, "B"), fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "daily_nbfc_research_queue.csv", template_research_queue_rows(user_filtered_leaderboard, "C"), fieldnames=LEADERBOARD_COLUMNS)
 
-    portfolio_plan = portfolio_plan_rows(leaderboard)
+    portfolio_plan = portfolio_plan_rows(user_filtered_leaderboard)
     _write_csv(
         out_dir / "portfolio_plan.csv",
         portfolio_plan,
@@ -861,7 +1144,11 @@ def main() -> None:
     print(f"Stocks rated: {len(ratings)}")
     print(f"Buy candidates: {len(buy_candidates)}")
     print(f"Daily market list: {len(daily_market_list)}")
+    print(f"Daily research queue: {len(daily_research_queue)}")
+    print(f"Data-incomplete profile rows: {len(daily_data_incomplete)}")
     print(f"Market mode: {engine.market_mode}")
+    print(f"Research profile: {preferences.profile_name} ({preferences.investment_horizon}, {preferences.risk_level})")
+    print(f"User-filtered leaderboard: {len(user_filtered_leaderboard)}")
     print(f"Portfolio picks: {len(portfolio_plan)}")
     print(f"Outputs: {out_dir}")
 
