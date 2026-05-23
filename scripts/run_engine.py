@@ -727,7 +727,8 @@ def _build_action_lists(leaderboard: List[dict]) -> tuple[List[dict], List[dict]
     buy_candidates = [
         row for row in leaderboard
         if row.get("recommendation") == "Buy Candidate"
-        and row.get("investability_status") == "Investable"
+        and row.get("investability_status") in {"Investable", "Watchlist"}
+        and row.get("gate_passed") is True
     ]
     undervalued_high_potential = sorted(
         [

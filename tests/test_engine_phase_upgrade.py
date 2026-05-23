@@ -1,7 +1,15 @@
 import unittest
 
 from engine import NSERatingEngine, RawStockData, NSEClassification
-from engine.advanced import action_sheet_rows, daily_market_list_rows, daily_research_queue_rows, data_incomplete_rows, portfolio_plan_rows
+from engine.advanced import (
+    _has_critical_value,
+    _missing_critical_fields,
+    action_sheet_rows,
+    daily_market_list_rows,
+    daily_research_queue_rows,
+    data_incomplete_rows,
+    portfolio_plan_rows,
+)
 from engine.bias_controls import BiasAudit
 from engine.cards import score_red_flags
 from engine.config import CARD_WEIGHTS
@@ -93,6 +101,11 @@ class PhaseUpgradeTests(unittest.TestCase):
         payload = rating.to_dict()
 
         self.assertIn(rating.recommendation, {"Buy Candidate", "Watchlist", "Avoid", "Insufficient Data"})
+        self.assertGreaterEqual(
+            sum(1 for r in ratings.values() if r.recommendation == "Buy Candidate"),
+            1,
+            "quality test universe should surface at least one deserving buy candidate",
+        )
         self.assertIn(rating.recommendation_confidence, {"High", "Medium", "Low"})
         self.assertIn("recommendation", payload)
         self.assertIn("potential_score", payload)
@@ -286,6 +299,30 @@ class PhaseUpgradeTests(unittest.TestCase):
         val = compute_cagr_3y(27.0, 8.0)
         self.assertIsNotNone(val)
         self.assertGreater(val, 0)
+
+    def test_derived_risk_metrics_satisfy_critical_field_checks(self) -> None:
+        stock = _make_stock("PROXY", pe=24.0, growth=2.0)
+        stock.fundamentals.pop("pledge_pct", None)
+        stock.fundamentals.pop("asm_stage", None)
+        stock.fundamentals.pop("gsm_stage", None)
+        stock.fundamentals.pop("governance_events", None)
+        stock.fundamentals["promoter_pledge"] = 5.0
+        stock.fundamentals["asm_gsm_risk"] = 0.0
+        stock.fundamentals["governance_event"] = 0.0
+        stock.on_asm = False
+        stock.on_gsm = False
+
+        self.assertTrue(_has_critical_value(stock, "pledge_pct"))
+        self.assertTrue(_has_critical_value(stock, "asm_stage"))
+        self.assertTrue(_has_critical_value(stock, "gsm_stage"))
+        self.assertTrue(_has_critical_value(stock, "governance_events"))
+
+        engine = NSERatingEngine({"PROXY": stock}, market_mode="neutral")
+        rating = engine.rate("PROXY")
+        self.assertNotIn("pledge_pct", rating.missing_critical_fields)
+        self.assertNotIn("asm_stage", rating.missing_critical_fields)
+        self.assertNotIn("gsm_stage", rating.missing_critical_fields)
+        self.assertNotIn("governance_events", rating.missing_critical_fields)
 
 
 if __name__ == "__main__":

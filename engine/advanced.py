@@ -28,6 +28,9 @@ from .config import (
     DAILY_LIST_MAX_NBFC_NAMES,
     DAILY_LIST_MAX_PER_SECTOR,
     DAILY_LIST_MIN_CONFIDENCE,
+    BUY_MIN_OPPORTUNITY_SCORE,
+    BUY_MIN_RISK_REWARD_RATIO,
+    BUY_MIN_SELECTION_SCORE,
     BUY_POTENTIAL_THRESHOLD,
     BUY_VALUATION_GAP_THRESHOLD,
     CALIBRATION_MIN_HIT_RATE_PCT,
@@ -116,13 +119,53 @@ def _source_score(value: str, scores: dict[str, float], default: float) -> float
 
 
 def _has_critical_value(stock: RawStockData, field: str) -> bool:
-    """Return True only when a critical risk field has a real value or source evidence."""
+    """
+    Return True when a critical risk field has direct or derived evidence.
+
+    Many pipelines populate derived risk metrics (promoter_pledge, asm_gsm_risk)
+    without duplicating the raw CSV column; those proxies count as coverage.
+    """
     value = stock.fundamentals.get(field)
     provenance = stock.metric_provenance.get(field)
+    f = stock.fundamentals
+
+    if field == "pledge_pct":
+        if provenance is not None or value is not None:
+            return True
+        return (
+            f.get("promoter_pledge") is not None
+            or stock.metric_provenance.get("promoter_pledge") is not None
+        )
+
     if field in {"asm_stage", "gsm_stage"}:
-        return provenance is not None or value not in {None, ""}
+        if provenance is not None or value is not None:
+            return True
+        if f.get("asm_gsm_risk") is not None and stock.metric_provenance.get("asm_gsm_risk"):
+            return True
+        if field == "asm_stage" and not stock.on_asm:
+            return True
+        if field == "gsm_stage" and not stock.on_gsm:
+            return True
+        return False
+
     if field == "governance_events":
-        return provenance is not None or (isinstance(value, list) and len(value) > 0)
+        if provenance is not None or (isinstance(value, list) and len(value) > 0):
+            return True
+        return (
+            f.get("governance_event") is not None
+            or stock.metric_provenance.get("governance_event") is not None
+        )
+
+    if field == "interest_coverage":
+        if provenance is not None or value is not None:
+            return True
+        return f.get("default_distress") is not None
+
+    if field == "debt_to_equity":
+        if provenance is not None or value is not None:
+            return True
+        return f.get("default_distress") is not None
+
     if value is None:
         return False
     if isinstance(value, str):
@@ -606,7 +649,14 @@ def _investability_gate(
     stock: RawStockData,
     market_mode: str,
 ) -> Tuple[bool, List[str]]:
-    reasons: List[str] = []
+    """
+    Hard safety checks required for Buy Candidate.
+
+    Soft issues (weak peers, marginal confidence) are recorded for analysts but
+    do not block a buy when card scores and composite merit are strong.
+    """
+    hard_reasons: List[str] = []
+    soft_reasons: List[str] = []
     required_conf_rank = _confidence_to_rank(GATE_MIN_CONFIDENCE_FOR_BUY)
     conf_rank = _confidence_to_rank(rating.recommendation_confidence)
 
@@ -618,31 +668,31 @@ def _investability_gate(
 
     red_score = rating.red_flags.score
     if red_score is None or red_score < red_min:
-        reasons.append(f"Red flags too high (score<{red_min})")
+        hard_reasons.append(f"Red flags too high (score<{red_min})")
 
     if conf_rank < required_conf_rank:
-        reasons.append(f"Confidence below {GATE_MIN_CONFIDENCE_FOR_BUY}")
+        soft_reasons.append(f"Confidence below {GATE_MIN_CONFIDENCE_FOR_BUY}")
 
     turnover = stock.fundamentals.get("avg_daily_turnover_cr")
     if turnover is not None and turnover < GATE_MIN_LIQUIDITY_TURNOVER_CR:
-        reasons.append(f"Low liquidity (<₹{GATE_MIN_LIQUIDITY_TURNOVER_CR} Cr/day)")
+        hard_reasons.append(f"Low liquidity (<₹{GATE_MIN_LIQUIDITY_TURNOVER_CR} Cr/day)")
 
     pledge = stock.fundamentals.get("pledge_pct")
     if pledge is not None and pledge > pledge_max:
-        reasons.append(f"High promoter pledge (>{pledge_max}%)")
+        hard_reasons.append(f"High promoter pledge (>{pledge_max}%)")
 
     distress = stock.fundamentals.get("default_distress")
     if distress is not None and distress > distress_max:
-        reasons.append(f"Default/distress risk too high (>{distress_max})")
+        hard_reasons.append(f"Default/distress risk too high (>{distress_max})")
 
     if rating.data_quality_score is not None and rating.data_quality_score < GATE_MIN_DATA_QUALITY_SCORE:
-        reasons.append(f"Data quality below {GATE_MIN_DATA_QUALITY_SCORE}")
+        hard_reasons.append(f"Data quality below {GATE_MIN_DATA_QUALITY_SCORE}")
 
     if rating.peer_group_quality == "Weak":
-        reasons.append("Peer group below configured minimum")
+        soft_reasons.append("Peer group below configured minimum")
 
     if len(rating.missing_critical_fields) > MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE:
-        reasons.append(
+        hard_reasons.append(
             "Too many missing critical risk fields "
             f"({len(rating.missing_critical_fields)} > {MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE})"
         )
@@ -650,15 +700,141 @@ def _investability_gate(
     if rating.template.value in {"B", "C"}:
         aq_fields = _financial_asset_quality_count(stock)
         if aq_fields < MIN_FINANCIAL_ASSET_QUALITY_FIELDS:
-            reasons.append(
+            hard_reasons.append(
                 "Financial asset-quality evidence too thin "
                 f"({aq_fields} < {MIN_FINANCIAL_ASSET_QUALITY_FIELDS})"
             )
 
     if rating.value_trap_score is not None and rating.value_trap_score >= VALUE_TRAP_BLOCK_THRESHOLD:
-        reasons.append(f"Value-trap risk too high ({rating.value_trap_score} >= {VALUE_TRAP_BLOCK_THRESHOLD})")
+        hard_reasons.append(f"Value-trap risk too high ({rating.value_trap_score} >= {VALUE_TRAP_BLOCK_THRESHOLD})")
 
-    return len(reasons) == 0, reasons
+    return len(hard_reasons) == 0, hard_reasons + soft_reasons
+
+
+def _buy_thresholds(market_mode: str) -> tuple[float, float, float, float]:
+    """Return (buy_potential, buy_value, watch_potential, watch_value) for regime."""
+    buy_potential = BUY_POTENTIAL_THRESHOLD
+    buy_value = BUY_VALUATION_GAP_THRESHOLD
+    watch_potential = WATCH_POTENTIAL_THRESHOLD
+    watch_value = WATCH_VALUATION_GAP_THRESHOLD
+    if market_mode == "bear":
+        buy_potential += 3
+        buy_value += 3
+        watch_potential += 2
+        watch_value += 2
+    return buy_potential, buy_value, watch_potential, watch_value
+
+
+def _compute_selection_score(
+    rating: StockRating,
+    market_mode: str,
+    calibration_multiplier: float,
+) -> float:
+    if market_mode == "bear":
+        q_boost = BEAR_MODE_QUALITY_BONUS
+        risk_penalty = BEAR_MODE_RISK_PENALTY
+    else:
+        q_boost = 1.0
+        risk_penalty = 1.0
+    return round(
+        (
+            (rating.opportunity_score or 0.0) * SELECTION_SCORE_WEIGHTS["opportunity_score"]
+            + (rating.potential_score or 0.0) * SELECTION_SCORE_WEIGHTS["potential_score"] * q_boost
+            + (rating.risk_reward_score or 0.0) * SELECTION_SCORE_WEIGHTS["risk_reward_score"]
+        )
+        * (rating.red_flags.score or 50.0)
+        / 100.0
+        / risk_penalty
+        * calibration_multiplier,
+        2,
+    )
+
+
+def _meets_buy_merit(rating: StockRating) -> bool:
+    """Strong composite merit used for the upper Watchlist → Buy path."""
+    if rating.selection_score is not None and rating.selection_score >= BUY_MIN_SELECTION_SCORE:
+        return True
+    if rating.risk_reward_ratio is not None and rating.risk_reward_ratio >= BUY_MIN_RISK_REWARD_RATIO:
+        return True
+    return False
+
+
+def _investability_ok_for_buy(rating: StockRating) -> bool:
+    """Investable outright, or high Watchlist opportunity with strong merit."""
+    if rating.investability_status == "Investable":
+        return True
+    if rating.investability_status != "Watchlist":
+        return False
+    opp = rating.opportunity_score or 0.0
+    return opp >= BUY_MIN_OPPORTUNITY_SCORE and _meets_buy_merit(rating)
+
+
+def _assign_recommendation(
+    rating: StockRating,
+    *,
+    gate_passed: bool,
+    market_mode: str,
+) -> str:
+    """
+    Map scores, gates, and data quality to a recommendation label.
+
+    Avoid is reserved for clear risk/uninvestable cases; borderline names stay on
+    Watchlist so analysts can review them instead of disappearing from output.
+    """
+    buy_potential, buy_value, watch_potential, watch_value = _buy_thresholds(market_mode)
+
+    if (
+        rating.investability_status == "Insufficient Data"
+        or rating.data_quality_status == "Weak Data"
+        or len(rating.missing_critical_fields) > MAX_MISSING_CRITICAL_FIELDS_RESEARCH
+    ):
+        return "Insufficient Data"
+
+    if rating.value_trap_score is not None and rating.value_trap_score >= VALUE_TRAP_BLOCK_THRESHOLD:
+        return "Avoid"
+
+    if rating.investability_status in {"Uninvestable", "Avoid"}:
+        return "Avoid"
+
+    if rating.red_flags.score is not None and rating.red_flags.score < 35:
+        return "Avoid"
+
+    potential = rating.potential_score
+    valuation_gap = rating.valuation_gap_score
+    scores_buy = (
+        potential is not None
+        and valuation_gap is not None
+        and potential >= buy_potential
+        and valuation_gap >= buy_value
+    )
+    scores_watch = (
+        potential is not None
+        and valuation_gap is not None
+        and potential >= watch_potential
+        and valuation_gap >= watch_value
+    )
+
+    if (
+        scores_buy
+        and gate_passed
+        and _investability_ok_for_buy(rating)
+        and rating.investability_status not in {"Uninvestable", "Avoid"}
+    ):
+        return "Buy Candidate"
+
+    if scores_watch and rating.investability_status not in {"Uninvestable", "Avoid"}:
+        return "Watchlist"
+
+    if scores_buy and not gate_passed:
+        return "Watchlist"
+
+    if (rating.opportunity_score or 0.0) >= 50 and rating.investability_status == "Watchlist":
+        return "Watchlist"
+
+    if rating.investability_status == "Avoid":
+        return "Avoid"
+
+    return "Watchlist"
 
 
 def _staged_entry_plan(rating: StockRating) -> str:
@@ -894,62 +1070,15 @@ def apply_advanced_overlays(
         rating.investability_gate_passed = gate_passed
         rating.gate_fail_reasons = fail_reasons
 
-        # Recommendation upgrade with gate and bear-mode strictness.
-        buy_potential = BUY_POTENTIAL_THRESHOLD
-        buy_value = BUY_VALUATION_GAP_THRESHOLD
-        watch_potential = WATCH_POTENTIAL_THRESHOLD
-        watch_value = WATCH_VALUATION_GAP_THRESHOLD
-        if market_mode == "bear":
-            buy_potential += 4
-            buy_value += 4
-            watch_potential += 2
-            watch_value += 2
-
-        if (
-            rating.investability_status == "Insufficient Data"
-            or rating.data_quality_status == "Weak Data"
-            or len(rating.missing_critical_fields) > MAX_MISSING_CRITICAL_FIELDS_RESEARCH
-        ):
-            rating.recommendation = "Insufficient Data"
-        elif rating.value_trap_score is not None and rating.value_trap_score >= VALUE_TRAP_BLOCK_THRESHOLD:
-            rating.recommendation = "Avoid"
-        elif (
-            rating.potential_score is not None
-            and rating.valuation_gap_score is not None
-            and rating.potential_score >= buy_potential
-            and rating.valuation_gap_score >= buy_value
-            and gate_passed
-            and rating.investability_status == "Investable"
-        ):
-            rating.recommendation = "Buy Candidate"
-        elif (
-            rating.potential_score is not None
-            and rating.valuation_gap_score is not None
-            and rating.potential_score >= watch_potential
-            and rating.valuation_gap_score >= watch_value
-            and rating.investability_status not in {"Uninvestable", "Avoid"}
-        ):
-            rating.recommendation = "Watchlist"
-        else:
-            rating.recommendation = "Avoid"
-
-        if not gate_passed and rating.recommendation == "Buy Candidate":
-            rating.recommendation = "Watchlist"
-
-        if market_mode == "bear":
-            q_boost = BEAR_MODE_QUALITY_BONUS
-            risk_penalty = BEAR_MODE_RISK_PENALTY
-        else:
-            q_boost = 1.0
-            risk_penalty = 1.0
-
-        rating.selection_score = round(
-            (
-                (rating.opportunity_score or 0.0) * SELECTION_SCORE_WEIGHTS["opportunity_score"]
-                + (rating.potential_score or 0.0) * SELECTION_SCORE_WEIGHTS["potential_score"] * q_boost
-                + (rating.risk_reward_score or 0.0) * SELECTION_SCORE_WEIGHTS["risk_reward_score"]
-            ) * (rating.red_flags.score or 50.0) / 100.0 / risk_penalty * rating.calibration_multiplier,
-            2,
+        rating.selection_score = _compute_selection_score(
+            rating,
+            market_mode,
+            rating.calibration_multiplier,
+        )
+        rating.recommendation = _assign_recommendation(
+            rating,
+            gate_passed=gate_passed,
+            market_mode=market_mode,
         )
 
         rating.staged_entry_plan = _staged_entry_plan(rating)

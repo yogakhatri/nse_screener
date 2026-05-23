@@ -408,12 +408,19 @@ SELECTION_SCORE_WEIGHTS = {
 CONFIDENCE_HIGH_THRESHOLD: float = 85.0
 CONFIDENCE_MEDIUM_THRESHOLD: float = 65.0
 
-# Buy/watch thresholds.
-# In bear mode we intentionally require stronger potential + valuation.
-BUY_POTENTIAL_THRESHOLD: float = 72.0
-BUY_VALUATION_GAP_THRESHOLD: float = 66.0
+# Buy/watch thresholds (card-derived potential + valuation gap).
+# Slightly below prior defaults so strong names are not excluded when one card
+# is borderline; bear-mode still adds a runtime bump in advanced.py.
+BUY_POTENTIAL_THRESHOLD: float = 70.0
+BUY_VALUATION_GAP_THRESHOLD: float = 64.0
 WATCH_POTENTIAL_THRESHOLD: float = 56.0
 WATCH_VALUATION_GAP_THRESHOLD: float = 46.0
+
+# Alternate buy path when opportunity score is in the upper Watchlist band but
+# composite merit (selection / risk-reward) is clearly strong.
+BUY_MIN_SELECTION_SCORE: float = 58.0
+BUY_MIN_RISK_REWARD_RATIO: float = 1.30
+BUY_MIN_OPPORTUNITY_SCORE: float = 65.0
 
 # Expected downside floor/cap to avoid unstable extremes.
 MIN_EXPECTED_DOWNSIDE_PCT: float = 5.0
@@ -496,7 +503,7 @@ MIN_DATA_QUALITY_SCORE_ACTIONABLE: float = 70.0
 MIN_DATA_QUALITY_SCORE_RESEARCH: float = 45.0
 
 # Minimum source quality required before the engine can publish Buy Candidate.
-GATE_MIN_DATA_QUALITY_SCORE: float = 65.0
+GATE_MIN_DATA_QUALITY_SCORE: float = 62.0
 
 # Critical-risk inputs. Missing values here do not mean the company is bad, but
 # they do mean the tool cannot safely call the result actionable without review.
@@ -535,7 +542,10 @@ NBFC_CRITICAL_RISK_FIELDS = (
     "credit_cost_discipline",
 )
 MISSING_CRITICAL_FIELD_PENALTY: float = 4.0
-MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE: int = 1
+# Allow up to two missing critical fields when other risk evidence is present
+# (e.g. derived asm_gsm_risk / default_distress) so good names are not blocked
+# solely by sparse CSV columns.
+MAX_MISSING_CRITICAL_FIELDS_ACTIONABLE: int = 2
 MAX_MISSING_CRITICAL_FIELDS_RESEARCH: int = 4
 
 # Financial templates require a minimum number of asset-quality inputs before a
@@ -630,8 +640,8 @@ RED_FLAG_CAPS = [
 ]
 
 INVESTABILITY = [
-    (70, 100, "Investable"),
-    (50, 70, "Watchlist"),
+    (65, 100, "Investable"),
+    (50, 65, "Watchlist"),
     (0, 50, "Avoid"),
 ]
 
