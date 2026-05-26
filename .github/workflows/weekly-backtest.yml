@@ -1,10 +1,7 @@
 name: Weekly Backtest
 
 on:
-  # Run every Sunday at 10:00 UTC
-  schedule:
-    - cron: "0 10 * * 0"
-
+  # Manual only — Actions → Weekly Backtest → Run workflow
   workflow_dispatch:
     inputs:
       run_date:

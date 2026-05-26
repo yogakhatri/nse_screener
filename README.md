@@ -125,6 +125,10 @@ make run RUN_DATE=$RUN_DATE \
 
 **Data quality matters.** Empty `top_picks.csv` usually means missing pledge/governance/bank fields — not a bug. See [docs/MINIMUM_VIABLE_DATA.md](docs/MINIMUM_VIABLE_DATA.md).
 
+### GitHub Actions (optional)
+
+Scheduled runs are **off**. To run the pipeline in the cloud: **Actions → Daily Run → Run workflow** (optional `run_date`). **Weekly Backtest** is manual the same way. **CI** still runs on push/PR only.
+
 ### Example profiles (in `config/`)
 
 | File | Intent |

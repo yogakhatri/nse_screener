@@ -1,11 +1,7 @@
 name: Daily Run
 
 on:
-  # Run Mon-Fri at 13:45 UTC (19:15 IST, after market close)
-  schedule:
-    - cron: "45 13 * * 1-5"
-
-  # Allow manual trigger with optional date override
+  # Manual only — Actions → Daily Run → Run workflow
   workflow_dispatch:
     inputs:
       run_date:
