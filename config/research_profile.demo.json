@@ -1,0 +1,16 @@
+{
+  "profile_name": "demo",
+  "investment_horizon": "3y",
+  "risk_level": "balanced",
+  "research_mode": "research_shortlist",
+  "return_persona": "quality_value",
+  "policy_themes": [],
+  "sector_preference": [],
+  "market_cap_preference": "all",
+  "custom_weights": {
+    "selection_score": 0.40,
+    "potential_score": 0.30,
+    "valuation_gap_score": 0.20,
+    "red_flags": 0.10
+  }
+}

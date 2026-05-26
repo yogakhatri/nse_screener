@@ -1,0 +1,32 @@
+{
+  "modes": {
+    "high_conviction": {
+      "label": "High conviction",
+      "primary_picks": 3,
+      "requires_gate_passed": true,
+      "allowed_tiers": ["High Confidence Research"]
+    },
+    "research_shortlist": {
+      "label": "Research shortlist",
+      "primary_picks": 3,
+      "requires_gate_passed": false,
+      "allowed_tiers": ["High Confidence Research", "Qualified Watchlist"]
+    },
+    "thematic": {
+      "label": "Thematic / policy watch",
+      "primary_picks": 3,
+      "requires_policy_themes": true,
+      "allowed_tiers": ["High Confidence Research", "Qualified Watchlist", "Data Incomplete"]
+    }
+  },
+  "personas": ["compounder", "quality_value", "steady_income"],
+  "policy_themes": [
+    "infrastructure",
+    "defence",
+    "renewables",
+    "manufacturing_pli",
+    "digital_india",
+    "financial_inclusion",
+    "healthcare"
+  ]
+}

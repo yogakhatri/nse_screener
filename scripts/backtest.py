@@ -32,11 +32,38 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def load_csv_picks(path: Path, source_label: str) -> List[dict]:
+    """Load ticker rows from a leaderboard-style CSV."""
+    if not path.exists():
+        return []
+    recs: List[dict] = []
+    try:
+        df = pd.read_csv(path)
+        ticker_col = next((c for c in df.columns if c.lower() in {"ticker", "symbol"}), None)
+        if not ticker_col:
+            return []
+        for _, row in df.iterrows():
+            recs.append({
+                "ticker": str(row[ticker_col]).strip().upper(),
+                "score": float(row.get("selection_score", row.get("shortlist_rank_score", 0)) or 0),
+                "recommendation": str(row.get("recommendation", "Watchlist")).strip(),
+                "research_status": str(row.get("research_status", "")).strip(),
+                "research_tier": str(row.get("research_tier", "")).strip(),
+                "sector": str(row.get("sector", "")).strip(),
+                "source": source_label,
+            })
+    except Exception:
+        return []
+    return recs
+
+
 def load_recommendations(run_dir: Path) -> List[dict]:
     """Load Buy recommendations from a run directory."""
-    recs = []
+    recs = load_csv_picks(run_dir / "top_picks.csv", "top_picks")
+    if recs:
+        return recs
 
-    # Try buy_candidates.csv first
+    # Fall back to buy_candidates.csv
     bc_path = run_dir / "buy_candidates.csv"
     if bc_path.exists():
         try:
@@ -284,11 +311,21 @@ def run_single_backtest(
     if not returns:
         return None
 
+    by_source: Dict[str, int] = defaultdict(int)
+    for rec in recs:
+        by_source[rec.get("source", "unknown")] += 1
+    by_tier: Dict[str, int] = defaultdict(int)
+    for rec in recs:
+        tier = rec.get("research_tier") or "unknown"
+        by_tier[tier] += 1
+
     result = {
         "run_date": run_date.isoformat(),
         "n_recommendations": len(recs),
         "n_with_returns": len(returns),
         "returns": returns,
+        "by_source": dict(by_source),
+        "by_tier": dict(by_tier),
     }
 
     for period in ["1M", "3M", "6M", "1Y"]:

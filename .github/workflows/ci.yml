@@ -28,3 +28,6 @@ jobs:
 
       - name: Run tests
         run: make test CI=true
+
+      - name: Demo run (fixture)
+        run: make demo-run CI=true

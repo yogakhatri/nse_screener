@@ -96,59 +96,95 @@ def _quarterly_ttm_yoy_pct(values: list[str]) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Metric computation from available data
 # ---------------------------------------------------------------------------
+def _cagr_to_approx_yoy(cagr_pct: Optional[float]) -> Optional[float]:
+    """Convert 3Y CAGR % to an approximate YoY % when quarterly YoY is unavailable."""
+    if cagr_pct is None:
+        return None
+    g = cagr_pct / 100.0
+    if g <= -0.99:
+        return None
+    return round(((1.0 + g) ** (1.0 / 3.0) - 1.0) * 100.0, 2)
+
+
 def compute_rev_growth_yoy(row: pd.Series, col_map: dict) -> Optional[float]:
-    """Approximate YoY revenue growth from 3Y CAGR if direct QoQ not available."""
-    # Direct column first
+    """Approximate YoY revenue growth from 3Y CAGR if direct YoY not available."""
     direct = _safe_float(row.get(col_map.get("sales_growth_yoy", ""), None))
     if direct is not None:
         return direct
-    return None
+    cagr = _safe_float(row.get(col_map.get("sales_growth_3y", ""), None))
+    return _cagr_to_approx_yoy(cagr)
 
 
 def compute_eps_growth_yoy(row: pd.Series, col_map: dict) -> Optional[float]:
-    """Approximate YoY EPS growth from 3Y CAGR if direct QoQ not available."""
+    """Approximate YoY EPS growth from 3Y CAGR if direct YoY not available."""
     direct = _safe_float(row.get(col_map.get("profit_growth_yoy", ""), None))
     if direct is not None:
         return direct
-    return None
+    cagr = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
+    return _cagr_to_approx_yoy(cagr)
 
 
 def compute_cfo_pat_ratio(row: pd.Series, col_map: dict) -> Optional[float]:
     """Compute CFO/PAT ratio from available data."""
-    # Direct column
     direct = _safe_float(row.get(col_map.get("cfo_pat", ""), None))
     if direct is not None:
         return direct
-    # From CFO and PAT columns
     cfo = _safe_float(row.get(col_map.get("cfo", ""), None))
     pat = _safe_float(row.get(col_map.get("pat", ""), None))
     if cfo is not None and pat is not None and pat != 0:
         return round(cfo / pat, 2)
+    opm = _safe_float(row.get(col_map.get("opm", ""), None))
+    if opm is not None:
+        return round(min(1.3, max(0.4, opm / 30.0)), 2)
     return None
 
 
 def compute_margin_trend(row: pd.Series, col_map: dict) -> Optional[float]:
-    """Estimate margin trend from available OPM and growth data."""
+    """Estimate margin trend from OPM and profit growth when multi-year margins are absent."""
     direct = _safe_float(row.get(col_map.get("margin_trend", ""), None))
     if direct is not None:
         return direct
-    return None
+    opm = _safe_float(row.get(col_map.get("opm", ""), None))
+    profit_cagr = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
+    if opm is None:
+        return None
+    drift = (profit_cagr or 0.0) / 300.0
+    margins = [opm - 2 * drift, opm - drift, opm]
+    return canonical_margin_trend(margins)
 
 
 def compute_fcf_consistency(row: pd.Series, col_map: dict) -> Optional[float]:
-    """Estimate FCF consistency from available data."""
+    """Estimate FCF consistency from FCF yield and profitability heuristics."""
     direct = _safe_float(row.get(col_map.get("fcf_consistency", ""), None))
     if direct is not None:
         return direct
-    return None
+    fcf_yield = _safe_float(row.get(col_map.get("fcf_yield", ""), None))
+    roce = _safe_float(row.get(col_map.get("roce_3y", ""), None))
+    if fcf_yield is None:
+        return None
+    positive_years = 5 if fcf_yield > 1.5 else (4 if fcf_yield > 0 else 2)
+    if roce is not None and roce >= 20:
+        positive_years = min(5, positive_years + 1)
+    series = [1.0] * positive_years + [-1.0] * (5 - positive_years)
+    return canonical_fcf_consistency(series)
 
 
 def compute_growth_stability(row: pd.Series, col_map: dict) -> Optional[float]:
-    """Estimate growth stability from available growth data."""
+    """Estimate growth stability from 3Y revenue/profit CAGRs."""
     direct = _safe_float(row.get(col_map.get("growth_stability", ""), None))
     if direct is not None:
         return direct
-    return None
+    rev_cagr = _safe_float(row.get(col_map.get("sales_growth_3y", ""), None))
+    profit_cagr = _safe_float(row.get(col_map.get("profit_growth_3y", ""), None))
+    if rev_cagr is None:
+        return None
+    rev_yoy = _cagr_to_approx_yoy(rev_cagr)
+    profit_yoy = _cagr_to_approx_yoy(profit_cagr) if profit_cagr is not None else rev_yoy
+    if rev_yoy is None:
+        return None
+    base = 100.0 + rev_cagr
+    path = [base * 0.85, base * 0.92, base * 0.97, base, base * (1 + (profit_yoy or rev_yoy) / 200.0)]
+    return canonical_growth_stability(path)
 
 
 # ---------------------------------------------------------------------------

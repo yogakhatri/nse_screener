@@ -1,0 +1,22 @@
+{
+  "profile_name": "compounder_5y",
+  "investment_horizon": "5y",
+  "risk_level": "balanced",
+  "research_mode": "research_shortlist",
+  "return_persona": "compounder",
+  "policy_themes": [],
+  "sector_preference": [],
+  "market_cap_preference": "exclude_micro",
+  "min_market_cap_cr": 1000,
+  "max_pe": 50,
+  "max_pb": 15,
+  "min_roce": 12,
+  "min_rev_cagr_3y": 8,
+  "min_cfo_pat_ratio": 0.7,
+  "custom_weights": {
+    "potential_score": 0.35,
+    "profitability": 0.25,
+    "growth": 0.20,
+    "red_flags": 0.20
+  }
+}

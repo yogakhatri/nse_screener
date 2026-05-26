@@ -1,0 +1,24 @@
+{
+  "profile_name": "steady_income_10y",
+  "investment_horizon": "10y",
+  "risk_level": "conservative",
+  "research_mode": "research_shortlist",
+  "return_persona": "steady_income",
+  "policy_themes": [],
+  "sector_preference": [],
+  "market_cap_preference": "large",
+  "min_market_cap_cr": 5000,
+  "max_pe": 35,
+  "max_pb": 8,
+  "max_debt_to_equity": 1.5,
+  "min_dividend_yield": 0.8,
+  "min_roce": 10,
+  "min_cfo_pat_ratio": 0.8,
+  "custom_weights": {
+    "profitability": 0.30,
+    "red_flags": 0.25,
+    "dividend_yield_score": 0.15,
+    "selection_score": 0.20,
+    "valuation_gap_score": 0.10
+  }
+}

@@ -43,6 +43,7 @@ class NSERatingEngine:
         stock_data: Dict[str, RawStockData],
         market_mode: str = "auto",
         run_date: Optional[date] = None,
+        investment_horizon: str | None = None,
     ):
         """
         stock_data: dict of {ticker: RawStockData}
@@ -52,6 +53,7 @@ class NSERatingEngine:
         validate_metric_direction_map()
         self.stocks = stock_data
         self.requested_market_mode = market_mode
+        self.investment_horizon = investment_horizon
         (
             self.market_mode,
             self.market_regime_source,
@@ -128,7 +130,11 @@ class NSERatingEngine:
         rating.contrarian    = score_contrarian(stock, peers, template)
         rating.red_flags     = score_red_flags(stock, peers, template)
 
-        rating = compute_opportunity_score(rating, market_mode=self.market_mode)
+        rating = compute_opportunity_score(
+            rating,
+            market_mode=self.market_mode,
+            investment_horizon=self.investment_horizon,
+        )
         return rating
 
     def rate_universe(self) -> Dict[str, StockRating]:

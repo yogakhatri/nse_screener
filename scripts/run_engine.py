@@ -54,6 +54,13 @@ from engine.preferences import (
     load_research_preferences,
     preferences_to_dict,
 )
+from engine.research_modes import VALID_RESEARCH_MODES, VALID_RETURN_PERSONAS
+from engine.shortlist import build_top_picks
+from engine.macro_context import build_macro_context
+from engine.analyst_workflow import (
+    build_analyst_research_queue,
+    worksheet_fieldnames,
+)
 
 CORE_CARDS = list(configured_core_cards())
 
@@ -161,7 +168,39 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="JSON object for user ranking weights, e.g. '{\"potential_score\":0.5,\"red_flags\":0.5}'",
     )
+    parser.add_argument(
+        "--research-mode",
+        choices=VALID_RESEARCH_MODES,
+        default=None,
+        help="Output strictness: high_conviction, research_shortlist (default), thematic",
+    )
+    parser.add_argument(
+        "--return-persona",
+        choices=VALID_RETURN_PERSONAS,
+        default=None,
+        help="Ranking persona: compounder, quality_value, steady_income",
+    )
+    parser.add_argument(
+        "--policy-themes",
+        default=None,
+        help="Comma-separated policy theme ids (infrastructure, defence, renewables, ...)",
+    )
     return parser.parse_args()
+
+
+def _attach_shortlist_fields(rows: List[dict], universe: Dict[str, object]) -> None:
+    """Add raw fundamentals used by persona shortlist filters."""
+    for row in rows:
+        stock = universe.get(row.get("ticker", ""))
+        if stock is None:
+            continue
+        f = getattr(stock, "fundamentals", {}) or {}
+        row["roce_3y_median"] = f.get("roce_3y_median")
+        row["roe"] = f.get("roe")
+        row["rev_cagr_3y"] = f.get("rev_cagr_3y")
+        row["dividend_yield"] = f.get("dividend_yield")
+        row["debt_to_equity"] = f.get("debt_to_equity")
+        row["red_flags_score"] = row.get("red_flags")
 
 
 def resolve_run_date(value: str | None) -> dt.date:
@@ -776,6 +815,9 @@ def main() -> None:
         min_cfo_pat_ratio=args.min_cfo_pat_ratio,
         min_dividend_yield=args.min_dividend_yield,
         custom_weights=args.custom_weights,
+        research_mode=args.research_mode,
+        return_persona=args.return_persona,
+        policy_themes=args.policy_themes,
     )
     run_date = resolve_run_date(args.date)
     run_date_str = run_date.isoformat()
@@ -900,7 +942,12 @@ def main() -> None:
     for warning in freshness_warnings + report["warnings"]:
         print(f"⚠️  {warning}")
 
-    engine = NSERatingEngine(universe, market_mode=args.market_mode, run_date=run_date)
+    engine = NSERatingEngine(
+        universe,
+        market_mode=args.market_mode,
+        run_date=run_date,
+        investment_horizon=preferences.investment_horizon,
+    )
     ratings = engine.rate_universe()
     apply_template_support_overrides(
         ratings,
@@ -1127,6 +1174,69 @@ def main() -> None:
         fieldnames=LEADERBOARD_COLUMNS + ["suggested_weight_pct", "risk_budget_note"],
     )
 
+    shortlist_rows = [dict(row) for row in user_filtered_leaderboard]
+    _attach_shortlist_fields(shortlist_rows, universe)
+    shortlist = build_top_picks(
+        shortlist_rows,
+        research_mode=preferences.research_mode,
+        return_persona=preferences.return_persona,
+        policy_themes=preferences.policy_themes,
+    )
+    top_pick_columns = LEADERBOARD_COLUMNS + [
+        "shortlist_rank_score",
+        "shortlist_persona_notes",
+        "shortlist_caveat",
+        "shortlist_reject_reason",
+        "roce_3y_median",
+        "rev_cagr_3y",
+        "dividend_yield",
+        "debt_to_equity",
+    ]
+
+    def _strip_shortlist_rows(rows: List[dict]) -> List[dict]:
+        drop = {"_policy_themes", "red_flags_score", "roe"}
+        return [{k: v for k, v in row.items() if k not in drop} for row in rows]
+
+    _write_csv(out_dir / "top_picks.csv", _strip_shortlist_rows(shortlist["primary"]), fieldnames=top_pick_columns)
+    _write_csv(
+        out_dir / "top_picks_next_tier.csv",
+        _strip_shortlist_rows(shortlist["secondary"]),
+        fieldnames=top_pick_columns,
+    )
+    macro_context = build_macro_context(
+        market_mode=engine.market_mode,
+        market_regime_source=engine.market_regime_source,
+        market_regime_confidence=engine.market_regime_confidence,
+        run_date=run_date_str,
+        policy_themes=preferences.policy_themes,
+    )
+    with open(out_dir / "macro_context.json", "w") as f:
+        json.dump(macro_context, f, indent=2)
+
+    top_tickers = tuple(r.get("ticker", "") for r in shortlist["primary"] if r.get("ticker"))
+    analyst_queue = build_analyst_research_queue(
+        user_filtered_leaderboard or leaderboard,
+        top_pick_tickers=top_tickers,
+        max_rows=50,
+    )
+    _write_csv(
+        out_dir / "analyst_research_queue.csv",
+        analyst_queue,
+        fieldnames=worksheet_fieldnames(),
+    )
+
+    with open(out_dir / "search_summary.json", "w") as f:
+        json.dump(
+            {
+                "profile": preferences_to_dict(preferences),
+                "summary": shortlist["summary"],
+                "rejected_sample": shortlist["rejected_sample"],
+                "macro_context": macro_context,
+            },
+            f,
+            indent=2,
+        )
+
     with open(out_dir / "coverage_snapshot.json", "w") as f:
         json.dump(metric_coverage(universe), f, indent=2)
 
@@ -1144,6 +1254,10 @@ def main() -> None:
     print(f"Run complete ({run_mode}) on {run_date_str}")
     print(f"Stocks rated: {len(ratings)}")
     print(f"Buy candidates: {len(buy_candidates)}")
+    print(f"Top picks (primary): {len(shortlist['primary'])}")
+    print(f"Top picks (next tier): {len(shortlist['secondary'])}")
+    if shortlist["summary"].get("empty_reason"):
+        print(f"Top picks note: {shortlist['summary']['empty_reason']}")
     print(f"Daily market list: {len(daily_market_list)}")
     print(f"Daily research queue: {len(daily_research_queue)}")
     print(f"Data-incomplete profile rows: {len(daily_data_incomplete)}")

@@ -15,7 +15,10 @@ from typing import Any, Dict, Iterable, Optional
 from .models import RawStockData, StockRating
 
 
-VALID_HORIZONS = ("6m", "1y", "3y", "5y")
+from .policy_themes import normalize_policy_themes
+from .research_modes import normalize_research_mode, normalize_return_persona
+
+VALID_HORIZONS = ("6m", "1y", "3y", "5y", "10y")
 VALID_RISK_LEVELS = ("conservative", "balanced", "aggressive")
 VALID_MARKET_CAP_PREFERENCES = ("all", "large", "mid", "small", "micro", "exclude_micro")
 WEIGHT_KEYS = (
@@ -66,6 +69,13 @@ DEFAULT_HORIZON_WEIGHTS = {
         "red_flags": 0.20,
         "valuation_gap_score": 0.05,
     },
+    "10y": {
+        "potential_score": 0.28,
+        "profitability": 0.30,
+        "growth": 0.18,
+        "red_flags": 0.22,
+        "valuation_gap_score": 0.02,
+    },
 }
 
 
@@ -95,6 +105,9 @@ class ResearchPreferences:
     min_cfo_pat_ratio: Optional[float] = None
     min_dividend_yield: Optional[float] = None
     custom_weights: Dict[str, float] = field(default_factory=dict)
+    research_mode: str = "research_shortlist"
+    return_persona: str = "quality_value"
+    policy_themes: tuple[str, ...] = ()
 
     def validate(self) -> "ResearchPreferences":
         """Return self after checking user-controlled inputs are safe."""
@@ -158,6 +171,9 @@ class ResearchPreferences:
             raise ValueError("custom_weights cannot contain negative values")
         if self.custom_weights and sum(self.custom_weights.values()) <= 0:
             raise ValueError("custom_weights must have a positive total")
+        normalize_research_mode(self.research_mode)
+        normalize_return_persona(self.return_persona)
+        normalize_policy_themes(self.policy_themes)
         return self
 
     @property
@@ -190,6 +206,8 @@ def _normalize_profile_dict(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     if "sector_preference" in normalized:
         normalized["sector_preference"] = _split_csv(normalized["sector_preference"])
+    if "policy_themes" in normalized:
+        normalized["policy_themes"] = normalize_policy_themes(normalized["policy_themes"])
     return normalized
 
 
@@ -213,6 +231,8 @@ def load_research_preferences(path: str | None = None, **overrides: Any) -> Rese
             continue
         if key == "sector_preference":
             payload[key] = _split_csv(value)
+        elif key == "policy_themes":
+            payload[key] = normalize_policy_themes(value)
         elif key == "custom_weights":
             payload[key] = parse_custom_weights(value)
         elif key in ResearchPreferences.__dataclass_fields__:
@@ -266,6 +286,7 @@ def preferences_to_dict(preferences: ResearchPreferences) -> dict[str, Any]:
         for key in ResearchPreferences.__dataclass_fields__
     }
     data["sector_preference"] = list(preferences.sector_preference)
+    data["policy_themes"] = list(preferences.policy_themes)
     return data
 
 
@@ -395,12 +416,18 @@ def apply_research_preferences(
     preferences: ResearchPreferences,
 ) -> None:
     """Annotate ratings with user filter status and profile-specific ranking score."""
+    from .policy_themes import sector_matches_themes
+
     preferred_sectors = {s.lower() for s in preferences.sector_preference}
+    theme_sectors_only = bool(preferences.policy_themes)
     for ticker, rating in ratings.items():
         stock = stocks[ticker]
         reasons: list[str] = []
         if preferred_sectors and rating.classification.sector.lower() not in preferred_sectors:
             reasons.append(f"sector {rating.classification.sector} not in preference list")
+        if theme_sectors_only:
+            if not sector_matches_themes(rating.classification.sector, preferences.policy_themes):
+                reasons.append("sector does not match active policy_themes")
 
         reasons.extend(_market_cap_filter_reasons(stock.fundamentals.get("market_cap_cr"), preferences))
         reasons.extend(_threshold_reasons(stock, rating, preferences))
@@ -423,7 +450,13 @@ def apply_research_preferences(
         rating.user_profile_notes = [
             f"horizon={preferences.investment_horizon}",
             f"risk_level={preferences.risk_level}",
+            f"research_mode={preferences.research_mode}",
+            f"return_persona={preferences.return_persona}",
         ]
+        if preferences.policy_themes:
+            rating.user_profile_notes.append(
+                "policy_themes=" + ",".join(preferences.policy_themes)
+            )
 
 
 def filter_preference_rows(rows: list[dict]) -> list[dict]:

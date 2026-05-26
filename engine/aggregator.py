@@ -5,8 +5,8 @@ Computes Opportunity Score, applies Red Flag caps, assigns Investability status.
 from __future__ import annotations
 from typing import Optional
 from .config import (
-    OPPORTUNITY_WEIGHTS,
     BEAR_OPPORTUNITY_WEIGHTS,
+    OPPORTUNITY_WEIGHTS,
     RED_FLAG_CAPS,
     INVESTABILITY,
     MIN_RANKABLE_CARDS,
@@ -19,7 +19,9 @@ from .config import (
     CONFIDENCE_HIGH_THRESHOLD,
     CONFIDENCE_MEDIUM_THRESHOLD,
 )
+from .horizon_weights import get_opportunity_weights
 from .models import StockRating
+
 
 def _rf_band(rf_score: float):
     for lo, hi, cap, status in RED_FLAG_CAPS:
@@ -27,7 +29,11 @@ def _rf_band(rf_score: float):
             return cap, status
     return None, "Avoid"
 
-def compute_opportunity_score(rating: StockRating, market_mode: str = "auto") -> StockRating:
+def compute_opportunity_score(
+    rating: StockRating,
+    market_mode: str = "auto",
+    investment_horizon: str | None = None,
+) -> StockRating:
     """
     1. Compute raw Opportunity Score from 6 cards (no Red Flags).
     2. Apply Red Flag cap.
@@ -43,7 +49,7 @@ def compute_opportunity_score(rating: StockRating, market_mode: str = "auto") ->
         "entry_point":   rating.entry_point,
         "contrarian":    rating.contrarian,
     }
-    opp_weights = BEAR_OPPORTUNITY_WEIGHTS if market_mode == "bear" else OPPORTUNITY_WEIGHTS
+    opp_weights = get_opportunity_weights(market_mode, investment_horizon)
 
     # Check eligibility: at least MIN_RANKABLE_CARDS of 6 cards must be rankable
     all_six = list(cards.values()) + [rating.red_flags]

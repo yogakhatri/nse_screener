@@ -46,7 +46,7 @@ GOVERNANCE_INPUT_JSON ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data build-classification source-registry prepare-csv enrich-fundamentals merge-public-enrichment fetch-shareholding fetch-governance-events fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest backtest dashboard check check-config test clean clean-generated
+.PHONY: help venv setup bootstrap init fetch-universe fetch-price-history fetch-screener-data build-classification source-registry prepare-csv enrich-fundamentals merge-public-enrichment fetch-shareholding fetch-governance-events fetch-delivery fetch-indices momentum-scoring institutional-tracking earnings-surprise forward-pe-peg stock-explainer data-freshness telegram-alerts prepare-universe daily-run auto-run ensure-csv run run-debug run-backtest demo-run backtest dashboard check check-config test clean clean-generated
 
 help:
 	@echo "NSE Screener Make Targets"
@@ -73,6 +73,7 @@ help:
 	@echo "  make stock-explainer RUN_DATE=...   Generate per-stock investment theses"
 	@echo "  make data-freshness RUN_DATE=...    Check data staleness & quality"
 	@echo "  make telegram-alerts RUN_DATE=... [DRY_RUN=true]  Send picks via Telegram"
+	@echo "  make demo-run                       Run engine on bundled fixture (offline demo)"
 	@echo "  make backtest RUN_DATE=...          Backtest past recommendations"
 	@echo "  make dashboard                      Launch Streamlit dashboard"
 	@echo "  make prepare-universe RUN_DATE=... NSE_UNIVERSE_CSV=... [FUNDAMENTALS_CSV=...]"
@@ -320,6 +321,9 @@ daily-run: venv
 	@$(MAKE) build-classification RUN_DATE="$(RUN_DATE)" SCREENER_CSV="$(SCREENER_CSV)" CLASSIFICATION_CSV="$(CLASSIFICATION_CSV)"
 	@echo "=== Fetch Price History ==="
 	@$(MAKE) fetch-price-history RUN_DATE="$(RUN_DATE)" SESSIONS="$(SESSIONS)" MAX_CALENDAR_DAYS="$(MAX_CALENDAR_DAYS)"
+	@echo "=== Optional enrichment fetch (best-effort) ==="
+	-@$(MAKE) fetch-shareholding RUN_DATE="$(RUN_DATE)" SHP_LIMIT=100 || true
+	-@$(MAKE) fetch-governance-events RUN_DATE="$(RUN_DATE)" GOVERNANCE_LOOKBACK_DAYS="$(GOVERNANCE_LOOKBACK_DAYS)" || true
 	@SCRAPED_FILE="$(SCREENER_CSV)"; \
 	FUND_FILE="$(FUNDAMENTALS_CSV)"; \
 	if [ -n "$$FUND_FILE" ] && [ "$$FUND_FILE" != "$$SCRAPED_FILE" ] && [ -f "$$FUND_FILE" ] && [ -s "$$FUND_FILE" ] && [ "$$(wc -l < "$$FUND_FILE")" -gt 1 ] && head -n 1 "$$FUND_FILE" | grep -q ','; then \
@@ -345,6 +349,20 @@ daily-run: venv
 	@echo ""
 	@echo "=== Post-Engine Enrichment ==="
 	-@$(MAKE) stock-explainer RUN_DATE="$(RUN_DATE)"
+
+DEMO_RUN_DATE ?= 2099-12-31
+
+demo-run: venv
+	@mkdir -p data/raw/fundamentals/screener
+	@cp tests/fixtures/demo_screener.csv data/raw/fundamentals/screener/screener_export_$(DEMO_RUN_DATE).csv
+	@$(MAKE) enrich-fundamentals RUN_DATE=$(DEMO_RUN_DATE) \
+		SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$(DEMO_RUN_DATE).csv
+	@$(MAKE) run-debug RUN_DATE=$(DEMO_RUN_DATE) \
+		SCREENER_CSV=data/raw/fundamentals/screener/screener_export_$(DEMO_RUN_DATE).csv \
+		PROFILE_CONFIG=config/research_profile.demo.json \
+		RUNNER_EXTRA_ARGS='--min-universe-size 5 --min-avg-core-rankable-pct 0 --min-core-cards-with-rankable 1 --min-classification-coverage-pct 0'
+	@rm -rf runs/demo && cp -R runs/$(DEMO_RUN_DATE)/profiles/demo runs/demo
+	@echo "Demo outputs: runs/demo/"
 
 auto-run: daily-run
 

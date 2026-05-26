@@ -1,0 +1,19 @@
+{
+  "profile_name": "thematic_policy_3y",
+  "investment_horizon": "3y",
+  "risk_level": "balanced",
+  "research_mode": "thematic",
+  "return_persona": "quality_value",
+  "policy_themes": ["infrastructure", "renewables", "manufacturing_pli", "digital_india"],
+  "sector_preference": [],
+  "market_cap_preference": "all",
+  "max_pe": 45,
+  "min_expected_upside_pct": 8,
+  "custom_weights": {
+    "selection_score": 0.30,
+    "potential_score": 0.30,
+    "valuation_gap_score": 0.20,
+    "risk_reward_score": 0.10,
+    "red_flags": 0.10
+  }
+}
