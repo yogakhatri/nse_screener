@@ -59,6 +59,7 @@ def load_run_data(run_dir: str) -> dict:
         "run_dir": str(rd),
         "stocks": [],
         "leaderboard": None,
+        "research_universe": None,
         "user_filtered_leaderboard": None,
         "action_sheet": None,
         "buy_candidates": None,
@@ -81,6 +82,7 @@ def load_run_data(run_dir: str) -> dict:
             continue
     for key, fname in [
         ("leaderboard", "leaderboard.csv"),
+        ("research_universe", "research_universe.csv"),
         ("user_filtered_leaderboard", "user_filtered_leaderboard.csv"),
         ("action_sheet", "action_sheet.csv"),
         ("buy_candidates", "buy_candidates.csv"),
@@ -125,13 +127,19 @@ def discover_runs() -> list[tuple[str, str]]:
     for d in sorted(runs_dir.iterdir(), reverse=True):
         if not d.is_dir():
             continue
+        if (
+            (d / "research_universe.csv").exists()
+            or (d / "leaderboard.csv").exists()
+            or list(d.glob("stock_*.json"))
+        ):
+            found.append((f"{d.name} (full universe)", str(d.relative_to(PROJECT_ROOT))))
         profiles = d / "profiles"
         if profiles.is_dir():
             for p in sorted(profiles.iterdir(), reverse=True):
-                if p.is_dir() and (p / "leaderboard.csv").exists():
+                if p.is_dir() and (
+                    (p / "research_universe.csv").exists() or (p / "leaderboard.csv").exists()
+                ):
                     found.append((f"{d.name} / {p.name}", str(p.relative_to(PROJECT_ROOT))))
-        if (d / "leaderboard.csv").exists() or list(d.glob("stock_*.json")):
-            found.append((d.name, str(d.relative_to(PROJECT_ROOT))))
     seen = set()
     out: list[tuple[str, str]] = []
     for label, path in found:
@@ -141,11 +149,24 @@ def discover_runs() -> list[tuple[str, str]]:
     return out
 
 
-def build_display_frame(data: dict) -> pd.DataFrame:
-    """Prefer full leaderboard CSV; fall back to stock JSON summaries."""
-    lb = data.get("user_filtered_leaderboard")
-    if lb is None or (isinstance(lb, pd.DataFrame) and lb.empty):
-        lb = data.get("leaderboard")
+def _pick_leaderboard_csv(data: dict, *, profile_filtered: bool) -> pd.DataFrame | None:
+    full = data.get("research_universe")
+    if full is None or (isinstance(full, pd.DataFrame) and full.empty):
+        full = data.get("leaderboard")
+    actionable = data.get("leaderboard")
+    profile = data.get("user_filtered_leaderboard")
+    if profile_filtered and isinstance(profile, pd.DataFrame) and not profile.empty:
+        return profile
+    if isinstance(full, pd.DataFrame) and not full.empty:
+        return full
+    if isinstance(profile, pd.DataFrame) and not profile.empty:
+        return profile
+    return None
+
+
+def build_display_frame(data: dict, *, profile_filtered: bool = False) -> pd.DataFrame:
+    """Build table from leaderboard CSV (full universe by default)."""
+    lb = _pick_leaderboard_csv(data, profile_filtered=profile_filtered)
     if isinstance(lb, pd.DataFrame) and not lb.empty:
         df = leaderboard_to_display_df(lb.copy())
         if "recommendation" in lb.columns:
@@ -185,6 +206,19 @@ def build_display_frame(data: dict) -> pd.DataFrame:
 
 def _filter_state_key(run_dir: str) -> str:
     return f"column_filters::{run_dir}"
+
+
+def _preset_key(run_dir: str) -> str:
+    return f"preset::{run_dir}"
+
+
+def reset_run_filter_state(run_dir: str) -> None:
+    """Clear sticky presets/column filters when user switches run folder."""
+    st.session_state[_preset_key(run_dir)] = "none"
+    prefix = _filter_state_key(run_dir)
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith(prefix):
+            del st.session_state[key]
 
 
 def render_column_filter_widgets(df: pd.DataFrame, run_dir: str) -> dict:
@@ -262,6 +296,27 @@ def render_column_filter_widgets(df: pd.DataFrame, run_dir: str) -> dict:
     return specs
 
 
+def apply_sidebar_filters(
+    df: pd.DataFrame,
+    *,
+    min_score: int,
+    gate_only: bool,
+    rec_filter: list[str],
+    preset: str,
+    col_specs: dict,
+) -> pd.DataFrame:
+    out = df.copy()
+    if min_score > 0 and "Score" in out.columns:
+        out = out[out["Score"].fillna(0) >= min_score]
+    if gate_only and "Gate Passed" in out.columns:
+        out = out[out["Gate Passed"] == True]
+    if rec_filter and "Recommendation" in out.columns:
+        out = out[out["Recommendation"].isin(rec_filter)]
+    if preset != "none":
+        out = apply_quick_filters(out, preset)
+    return apply_column_filters(out, col_specs)
+
+
 def apply_quick_filters(df: pd.DataFrame, preset: str) -> pd.DataFrame:
     if preset == "gate_passed":
         return df[df["Gate Passed"] == True] if "Gate Passed" in df.columns else df
@@ -305,20 +360,45 @@ def main() -> None:
         run_dir = runs[idx][1]
         data = load_run_data(run_dir)
 
+        full_df = build_display_frame(data, profile_filtered=False)
+        profile_df = build_display_frame(data, profile_filtered=True)
+        actionable_lb = data.get("leaderboard")
+        actionable_n = len(actionable_lb) if isinstance(actionable_lb, pd.DataFrame) else 0
+        profile_only = st.checkbox(
+            "Profile-filtered list only",
+            value=False,
+            help="Uses user_filtered_leaderboard.csv (~100–200 rows). "
+            "Leave off to browse the full ranked universe.",
+        )
+        base_df = profile_df if profile_only else full_df
+
         st.divider()
         st.header("Quick filters")
+        st.caption(
+            f"Research universe: **{len(full_df)}** · Actionable leaderboard: **{actionable_n}** · "
+            f"Profile list: **{len(profile_df)}**"
+        )
+        if "demo" in run_dir.lower() and len(full_df) <= 25:
+            st.info(
+                "Demo run is a **20-stock IT sample**. Research table shows all rated names; "
+                "only a few pass actionable filters. For ~1,400+ stocks use your dated "
+                "`make daily-run` folder (e.g. `2026-05-26 (full universe)`)."
+            )
         min_score = st.slider("Min opportunity score", 0, 100, 0)
         gate_only = st.checkbox("Gate passed only", value=False)
-        base_for_recs = build_display_frame(data)
+        base_for_recs = base_df
         recs = sorted(
             {normalize_recommendation(x) for x in base_for_recs.get("Recommendation", pd.Series()).unique()}
         )
         recs = [r for r in RECOMMENDATION_ORDER if r in recs] + [r for r in recs if r and r not in RECOMMENDATION_ORDER]
         rec_filter = st.multiselect("Recommendation", recs, default=[])
 
-        preset_key = f"preset::{run_dir}"
+        preset_key = _preset_key(run_dir)
         if preset_key not in st.session_state:
             st.session_state[preset_key] = "none"
+        active_preset = st.session_state[preset_key]
+        if active_preset != "none":
+            st.warning(f"Active preset: **{active_preset.replace('_', ' ')}** — click Clear preset to see all rows.")
         st.caption("Presets")
         p1, p2 = st.columns(2)
         with p1:
@@ -333,43 +413,38 @@ def main() -> None:
                 st.session_state[preset_key] = "gate_failed_watchlist"
         if st.button("Clear preset", use_container_width=True):
             st.session_state[preset_key] = "none"
+            reset_run_filter_state(run_dir)
         preset = st.session_state[preset_key]
 
         st.divider()
         with st.expander("Column filters", expanded=False):
             st.caption("Filter by values in each column (like Excel).")
-            col_specs = render_column_filter_widgets(
-                build_display_frame(data), run_dir
-            )
+            col_specs = render_column_filter_widgets(base_df, run_dir)
 
         st.divider()
         st.header("Summary")
-        base_df = build_display_frame(data)
-        filtered = base_df.copy()
-        if min_score > 0 and "Score" in filtered.columns:
-            filtered = filtered[filtered["Score"].fillna(0) >= min_score]
-        if gate_only and "Gate Passed" in filtered.columns:
-            filtered = filtered[filtered["Gate Passed"] == True]
-        if rec_filter and "Recommendation" in filtered.columns:
-            filtered = filtered[filtered["Recommendation"].isin(rec_filter)]
-        if preset != "none":
-            filtered = apply_quick_filters(filtered, preset)
-        filtered = apply_column_filters(filtered, col_specs)
+        filtered = apply_sidebar_filters(
+            base_df,
+            min_score=min_score,
+            gate_only=gate_only,
+            rec_filter=rec_filter,
+            preset=preset,
+            col_specs=col_specs,
+        )
         st.metric("Rows shown", len(filtered))
         st.metric("Universe", len(base_df))
         if "Gate Passed" in filtered.columns:
             st.metric("Gate passed", int(filtered["Gate Passed"].sum()))
 
-    df = build_display_frame(data)
-    if min_score > 0 and "Score" in df.columns:
-        df = df[df["Score"].fillna(0) >= min_score]
-    if gate_only and "Gate Passed" in df.columns:
-        df = df[df["Gate Passed"] == True]
-    if rec_filter and "Recommendation" in df.columns:
-        df = df[df["Recommendation"].isin(rec_filter)]
-    if preset != "none":
-        df = apply_quick_filters(df, preset)
-    df = apply_column_filters(df, col_specs)
+    df = apply_sidebar_filters(
+        base_df,
+        min_score=min_score,
+        gate_only=gate_only,
+        rec_filter=rec_filter,
+        preset=preset,
+        col_specs=col_specs,
+    )
+    research_full = full_df
 
     tabs = st.tabs([
         "Overview",
@@ -435,11 +510,39 @@ def main() -> None:
 
     with tabs[2]:
         st.subheader("Research table")
-        st.caption(f"{len(df)} rows after sidebar filters. Use **Column filters** in the sidebar for per-column values.")
+        apply_research_filters = st.checkbox(
+            "Apply sidebar filters to this table",
+            value=False,
+            help="Off by default so you see the full ranked universe. "
+            "Turn on to use score/gate/preset/column filters from the sidebar.",
+        )
+        research_df = (
+            apply_sidebar_filters(
+                research_full,
+                min_score=min_score,
+                gate_only=gate_only,
+                rec_filter=rec_filter,
+                preset=preset,
+                col_specs=col_specs,
+            )
+            if apply_research_filters
+            else research_full
+        )
+        if len(research_df) < len(research_full):
+            st.info(
+                f"Showing **{len(research_df)}** of **{len(research_full)}** ranked stocks. "
+                "Uncheck sidebar filters or click **Clear preset** to widen the list."
+            )
+        else:
+            st.caption(
+                f"Research universe: **{len(research_df)}** stocks "
+                f"(actionable shortlist: **{actionable_n}**). "
+                "Use sidebar filters only when you want a narrow slice."
+            )
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
             sort_options = [
-                c for c in df.columns
+                c for c in research_df.columns
                 if c in SCORE_STYLE_COLUMNS or c in {"Ticker", "Selection", "Upside %"}
             ]
             default_sort = "Score" if "Score" in sort_options else (sort_options[0] if sort_options else "Ticker")
@@ -449,7 +552,8 @@ def main() -> None:
                 index=(sort_options.index(default_sort) if default_sort in sort_options else 0),
             )
         with c2:
-            row_limit = st.number_input("Max rows", 10, 5000, min(100, max(100, len(df))), step=50)
+            default_limit = min(500, max(100, len(research_df)))
+            row_limit = st.number_input("Max rows", 10, 5000, default_limit, step=50)
         with c3:
             show_gate_cols = st.checkbox("Show gate / tier columns", value=True)
 
@@ -460,18 +564,18 @@ def main() -> None:
         ]
         if show_gate_cols:
             default_cols += ["Gate Fail Reasons", "Missing Critical Fields", "Value Trap", "Top Pick"]
-        visible = [c for c in default_cols if c in df.columns]
+        visible = [c for c in default_cols if c in research_df.columns]
         extra = st.multiselect(
             "Additional columns",
-            [c for c in df.columns if c not in visible],
+            [c for c in research_df.columns if c not in visible],
             default=[],
         )
-        visible = visible + [c for c in extra if c in df.columns]
-        table = df.sort_values(sort_by, ascending=False, na_position="last")[visible].head(int(row_limit))
+        visible = visible + [c for c in extra if c in research_df.columns]
+        table = research_df.sort_values(sort_by, ascending=False, na_position="last")[visible].head(int(row_limit))
         st.dataframe(style_dataframe(table), use_container_width=True, height=620)
         st.download_button(
             "Download filtered CSV",
-            df.to_csv(index=False),
+            research_df.to_csv(index=False),
             file_name="filtered_research.csv",
             mime="text/csv",
         )

@@ -79,10 +79,11 @@ BLOCK_RUN_ON_UNSUPPORTED_TEMPLATES: bool = False
 
 # Raw price-derived metric controls.
 # When enabled, locally cached bhavcopy history becomes the preferred source for
-# price/technical metrics. CSV values are used only when raw history is missing.
+# price/technical metrics. CSV fallback is disabled by default to keep
+# EOD-derived metrics anchored to exchange bhavcopy data.
 ENABLE_RAW_PRICE_METRICS: bool = True
 PRICE_HISTORY_LOOKBACK_SESSIONS: int = 1300
-RAW_PRICE_METRIC_FALLBACK_TO_CSV: bool = True
+RAW_PRICE_METRIC_FALLBACK_TO_CSV: bool = False
 
 # Outlier clipping for peer distributions before percentile scoring.
 # Narrower bounds (e.g. 0.05/0.95) reduce tail influence more aggressively.

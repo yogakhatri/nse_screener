@@ -421,6 +421,10 @@ def _apply_price_history_metrics(
         if not RAW_PRICE_METRIC_FALLBACK_TO_CSV:
             for metric in RAW_PRICE_METRICS:
                 fundamentals[metric] = None
+            # Keep raw passthrough aligned with strict bhavcopy mode for
+            # liquidity fields; close_price may still come from fundamentals CSV
+            # for valuation math when bhavcopy history is unavailable.
+            raw["avg_daily_turnover_cr"] = None
         return
     for metric, value in computed.items():
         if value is None:

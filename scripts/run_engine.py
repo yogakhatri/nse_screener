@@ -960,6 +960,7 @@ def main() -> None:
         ratings,
         exclude_statuses=("Insufficient Data", "Unsupported Data", "Uninvestable"),
     )
+    research_universe = engine.to_leaderboard(ratings, include_all_rated=True)
     user_filtered_leaderboard = filter_preference_rows(leaderboard)
 
     for ticker, rating in ratings.items():
@@ -967,6 +968,7 @@ def main() -> None:
             json.dump(rating.to_dict(), f, indent=2)
 
     _write_csv(out_dir / "leaderboard.csv", leaderboard, fieldnames=LEADERBOARD_COLUMNS)
+    _write_csv(out_dir / "research_universe.csv", research_universe, fieldnames=LEADERBOARD_COLUMNS)
     _write_csv(out_dir / "user_filtered_leaderboard.csv", user_filtered_leaderboard, fieldnames=LEADERBOARD_COLUMNS)
     with open(out_dir / "research_profile.json", "w") as f:
         json.dump(preferences_to_dict(preferences), f, indent=2)

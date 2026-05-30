@@ -192,10 +192,13 @@ class NSERatingEngine:
                 rating.basic_industry_percentile = percentile(idx, total)
 
     def to_leaderboard(
-        self, ratings: Dict[str, StockRating],
-        exclude_statuses=("Uninvestable", "Insufficient Data", "Unsupported Data")
+        self,
+        ratings: Dict[str, StockRating],
+        exclude_statuses=("Uninvestable", "Insufficient Data", "Unsupported Data"),
+        *,
+        include_all_rated: bool = False,
     ) -> List[dict]:
-        """Return sorted list of rating dicts by Opportunity Score (desc)."""
+        """Return sorted list of rating dicts by selection score (desc)."""
         def _source_cell(rating: StockRating, metrics: tuple[str, ...]) -> str:
             """Compress selected metric provenance into a CSV-friendly cell."""
             parts = []
@@ -211,10 +214,11 @@ class NSERatingEngine:
 
         rows = []
         for ticker, r in ratings.items():
-            if r.investability_status in exclude_statuses:
-                continue
-            if r.recommendation in {"Insufficient Data", "Unsupported"}:
-                continue
+            if not include_all_rated:
+                if r.investability_status in exclude_statuses:
+                    continue
+                if r.recommendation in {"Insufficient Data", "Unsupported"}:
+                    continue
             rows.append({
                 "ticker":              ticker,
                 "name":                r.name,

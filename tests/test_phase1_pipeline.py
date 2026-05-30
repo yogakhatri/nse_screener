@@ -379,6 +379,32 @@ class Phase1PipelineTests(unittest.TestCase):
             self.assertNotEqual(stock.fundamentals["price_vs_50dma"], 999.0)
             self.assertIsNotNone(stock.price_history)
 
+    def test_load_from_screener_disables_csv_price_fallback_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "screener.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "NSE Symbol": "AAA",
+                        "Name": "AAA",
+                        "Macro Sector": "Technology",
+                        "Sector": "Technology",
+                        "Industry": "Software",
+                        "Basic Industry": "Computers - Software & Consulting",
+                        "Current Price": "10",
+                        "6 Month Return": "22",
+                        "Avg Daily Turnover Cr": "50",
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+            with patch("scripts.load_data.RAW_PRICE_METRIC_FALLBACK_TO_CSV", False):
+                universe = load_from_screener(str(csv_path), price_history_map={})
+            stock = universe["AAA"]
+            self.assertEqual(stock.price_source, "missing")
+            self.assertEqual(stock.fundamentals["close_price"], 10.0)
+            self.assertIsNone(stock.fundamentals["return_6m"])
+            self.assertIsNone(stock.fundamentals["avg_daily_turnover_cr"])
+
     def test_load_from_screener_backfills_classification_metadata_for_legacy_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "legacy_screener.csv"
